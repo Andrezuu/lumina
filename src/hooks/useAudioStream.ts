@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { Audio } from 'expo-av';
-import AudioRecord from 'react-native-audio-record';
+import { ExpoPlayAudioStream, EncodingTypes } from '@saltmango/expo-audio-stream';
 
 export interface AudioStreamState {
   samples: Float32Array | null;
@@ -9,16 +9,26 @@ export interface AudioStreamState {
 }
 
 const SAMPLE_RATE = 44100;
-const FLUSH_INTERVAL_MS = 300;
+const CHUNK_INTERVAL_MS = 300;
 
-/** Decodes a base64 Int16 PCM chunk into a normalized Float32Array. */
-function decodePcmChunk(base64: string): Float32Array {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+/** Decodes a base64 Int16-LE PCM chunk → normalized Float32Array in [-1, 1]. */
+function decodePcmChunk(data: string | Uint8Array | ArrayBuffer): Float32Array | null {
+  let bytes: Uint8Array;
 
-  const view = new DataView(bytes.buffer);
-  const numSamples = bytes.length >> 1; // 16-bit = 2 bytes per sample
+  if (typeof data === 'string') {
+    const binary = atob(data);
+    bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  } else if (data instanceof ArrayBuffer) {
+    bytes = new Uint8Array(data);
+  } else {
+    bytes = data;
+  }
+
+  if (bytes.length < 2) return null;
+
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const numSamples = bytes.length >> 1;
   const samples = new Float32Array(numSamples);
   for (let i = 0; i < numSamples; i++) {
     samples[i] = view.getInt16(i * 2, true) / 32768.0;
@@ -27,11 +37,9 @@ function decodePcmChunk(base64: string): Float32Array {
 }
 
 /**
- * Starts/stops a real-time PCM stream from the microphone using
- * react-native-audio-record. Emits flushed Float32Array samples every
- * FLUSH_INTERVAL_MS ms via the `samples` state.
- *
- * Requires a native build (expo prebuild) — not supported in Expo Go.
+ * Real-time PCM stream via @saltmango/expo-audio-stream.
+ * Emits new `samples` every CHUNK_INTERVAL_MS ms while recording.
+ * Requires a native dev client build (not Expo Go).
  */
 export function useAudioStream(): AudioStreamState & {
   start: () => Promise<void>;
@@ -41,21 +49,7 @@ export function useAudioStream(): AudioStreamState & {
   const [samples, setSamples] = useState<Float32Array | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const bufferRef = useRef<Float32Array[]>([]);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const flushBuffer = useCallback(() => {
-    if (bufferRef.current.length === 0) return;
-    const chunks = bufferRef.current.splice(0);
-    const totalLen = chunks.reduce((sum, c) => sum + c.length, 0);
-    const merged = new Float32Array(totalLen);
-    let offset = 0;
-    for (const c of chunks) {
-      merged.set(c, offset);
-      offset += c.length;
-    }
-    setSamples(merged);
-  }, []);
+  const subscriptionRef = useRef<{ remove: () => void } | null>(null);
 
   const start = useCallback(async () => {
     try {
@@ -65,45 +59,34 @@ export function useAudioStream(): AudioStreamState & {
         return;
       }
 
-      AudioRecord.init({
+      const { subscription } = await ExpoPlayAudioStream.startMicrophone({
         sampleRate: SAMPLE_RATE,
         channels: 1,
-        bitsPerSample: 16,
-        audioSource: 6, // MediaRecorder.AudioSource.MIC on Android
-        wavFile: 'lumina_tmp.wav',
+        encoding: EncodingTypes.PCM_S16LE,
+        interval: CHUNK_INTERVAL_MS,
+        onAudioStream: (event) => {
+          if (!event.data) return;
+          const decoded = decodePcmChunk(event.data as string | Uint8Array | ArrayBuffer);
+          if (decoded) setSamples(decoded);
+        },
       });
 
-      AudioRecord.on('data', (data: string) => {
-        bufferRef.current.push(decodePcmChunk(data));
-      });
-
-      AudioRecord.start();
+      subscriptionRef.current = subscription ?? null;
       setIsRecording(true);
       setError(null);
-
-      intervalRef.current = setInterval(flushBuffer, FLUSH_INTERVAL_MS);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Error al iniciar grabación');
     }
-  }, [flushBuffer]);
-
-  const stop = useCallback(async () => {
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
-    try {
-      await AudioRecord.stop();
-    } catch {}
-    setIsRecording(false);
-    bufferRef.current = [];
   }, []);
 
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
+  const stop = useCallback(async () => {
+    subscriptionRef.current?.remove();
+    subscriptionRef.current = null;
+    try {
+      await ExpoPlayAudioStream.stopMicrophone();
+    } catch {}
+    setIsRecording(false);
+    setSamples(null);
   }, []);
 
   return { samples, isRecording, error, start, stop };

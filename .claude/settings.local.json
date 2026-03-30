@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /j/proyectos/lumina/front-lumina -name README* -type f)",
+      "Bash(find /j/proyectos/lumina/front-lumina/node_modules -path *saltamango*audio* -o -path *expo-audio*)"
+    ]
+  }
+}
