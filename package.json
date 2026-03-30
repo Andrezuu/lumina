@@ -1,7 +1,7 @@
 {
   "name": "front-lumina",
   "version": "1.0.0",
-  "main": "index.ts",
+  "main": "expo-router/entry",
   "scripts": {
     "start": "expo start",
     "android": "expo start --android",
@@ -10,9 +10,14 @@
   },
   "dependencies": {
     "expo": "~54.0.33",
+    "expo-av": "~15.0.2",
+    "expo-constants": "~17.0.8",
+    "expo-router": "~4.0.17",
     "expo-status-bar": "~3.0.9",
     "react": "19.1.0",
-    "react-native": "0.81.5"
+    "react-native": "0.81.5",
+    "react-native-audio-record": "^0.2.2",
+    "tonal": "^6.4.3"
   },
   "devDependencies": {
     "@types/react": "~19.1.0",
