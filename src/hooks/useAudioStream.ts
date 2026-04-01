@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState } from 'react';
-import { Audio } from 'expo-av';
-import { ExpoPlayAudioStream, EncodingTypes } from '@saltmango/expo-audio-stream';
+import { PermissionsAndroid, Platform } from 'react-native';
+import { ExpoPlayAudioStream } from '@saltmango/expo-audio-stream';
+import type { Subscription } from '@saltmango/expo-audio-stream/build/events';
 
 export interface AudioStreamState {
   samples: Float32Array | null;
@@ -11,23 +12,21 @@ export interface AudioStreamState {
 const SAMPLE_RATE = 44100;
 const CHUNK_INTERVAL_MS = 300;
 
-/** Decodes a base64 Int16-LE PCM chunk → normalized Float32Array in [-1, 1]. */
-function decodePcmChunk(data: string | Uint8Array | ArrayBuffer): Float32Array | null {
-  let bytes: Uint8Array;
+/**
+ * Normalizes AudioDataEvent.data to Float32Array in [-1, 1].
+ * - Float32Array: returned as-is (already normalized by the lib)
+ * - string (base64 Int16-LE PCM): decoded manually
+ */
+function toFloat32(data: string | Float32Array): Float32Array | null {
+  if (data instanceof Float32Array) return data;
 
-  if (typeof data === 'string') {
-    const binary = atob(data);
-    bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-  } else if (data instanceof ArrayBuffer) {
-    bytes = new Uint8Array(data);
-  } else {
-    bytes = data;
-  }
+  const binary = atob(data);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
 
   if (bytes.length < 2) return null;
 
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const view = new DataView(bytes.buffer);
   const numSamples = bytes.length >> 1;
   const samples = new Float32Array(numSamples);
   for (let i = 0; i < numSamples; i++) {
@@ -49,24 +48,28 @@ export function useAudioStream(): AudioStreamState & {
   const [samples, setSamples] = useState<Float32Array | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const subscriptionRef = useRef<{ remove: () => void } | null>(null);
+  const subscriptionRef = useRef<Subscription | null>(null);
 
   const start = useCallback(async () => {
     try {
-      const { status } = await Audio.requestPermissionsAsync();
-      if (status !== 'granted') {
-        setError('Permiso de micrófono denegado');
-        return;
+      if (Platform.OS === 'android') {
+        const status = await PermissionsAndroid.request(
+          PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
+        );
+        if (status !== PermissionsAndroid.RESULTS.GRANTED) {
+          setError('Permiso de micrófono denegado');
+          return;
+        }
       }
 
       const { subscription } = await ExpoPlayAudioStream.startMicrophone({
         sampleRate: SAMPLE_RATE,
         channels: 1,
-        encoding: EncodingTypes.PCM_S16LE,
+        encoding: 'pcm_16bit',
         interval: CHUNK_INTERVAL_MS,
-        onAudioStream: (event) => {
+        onAudioStream: async (event) => {
           if (!event.data) return;
-          const decoded = decodePcmChunk(event.data as string | Uint8Array | ArrayBuffer);
+          const decoded = toFloat32(event.data);
           if (decoded) setSamples(decoded);
         },
       });

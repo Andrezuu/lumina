@@ -1,68 +1,89 @@
 import { StatusBar } from 'expo-status-bar';
-import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { Animated, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
+import { useRef, useEffect } from 'react';
 import { useChordDetection } from '../src/hooks/useChordDetection';
+import { ChordDisplay } from '../src/components/ChordDisplay';
 
 const MODE_LABELS: Record<string, string> = {
-  ionian: 'Jónico (mayor)',
-  dorian: 'Dórico',
-  phrygian: 'Frigio',
-  lydian: 'Lidio',
-  mixolydian: 'Mixolidio',
-  aeolian: 'Eólico (menor)',
-  locrian: 'Locrio',
+  ionian:         'Jónico',
+  dorian:         'Dórico',
+  phrygian:       'Frigio',
+  lydian:         'Lidio',
+  mixolydian:     'Mixolidio',
+  aeolian:        'Eólico',
+  locrian:        'Locrio',
   harmonic_minor: 'Menor armónico',
-  melodic_minor: 'Menor melódico',
+  melodic_minor:  'Menor melódico',
 };
 
 export default function HomeScreen() {
   const { chord, tonality, mode, isRecording, error, start, stop } = useChordDetection();
 
+  // Recording pulse dot
+  const pulseAnim = useRef(new Animated.Value(1)).current;
+  useEffect(() => {
+    if (!isRecording) {
+      pulseAnim.setValue(1);
+      return;
+    }
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, { toValue: 0.3, duration: 700, useNativeDriver: true }),
+        Animated.timing(pulseAnim, { toValue: 1,   duration: 700, useNativeDriver: true }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [isRecording, pulseAnim]);
+
   return (
     <View style={styles.container}>
       <StatusBar style="light" />
 
-      <Text style={styles.appName}>LUMINA</Text>
-
-      {/* Chord display */}
-      <View style={styles.chordBox}>
-        <Text style={styles.chordText}>{chord?.chord ?? '—'}</Text>
-        {chord && chord.quality !== 'major' && (
-          <Text style={styles.qualityText}>{chord.quality}</Text>
-        )}
-        {chord && (
-          <View style={styles.confidenceTrack}>
-            <View style={[styles.confidenceFill, { width: `${Math.round(chord.confidence * 100)}%` }]} />
-          </View>
-        )}
+      {/* Header */}
+      <View style={styles.header}>
+        <Text style={styles.appName}>LUMINA</Text>
+        <Animated.View style={[styles.dot, { opacity: pulseAnim }, !isRecording && styles.dotOff]} />
       </View>
 
-      {/* Key & mode */}
+      {/* Main chord */}
+      <View style={styles.chordArea}>
+        <ChordDisplay chord={chord} isActive={isRecording} />
+      </View>
+
+      {/* Key + mode */}
       <View style={styles.infoBlock}>
-        {tonality && (
-          <View style={styles.infoRow}>
-            <Text style={styles.infoLabel}>Tonalidad</Text>
-            <Text style={styles.infoValue}>
-              {tonality.key} {tonality.mode === 'major' ? 'mayor' : 'menor'}
-            </Text>
-          </View>
-        )}
-        {mode && (
-          <View style={styles.infoRow}>
-            <Text style={styles.infoLabel}>Modo</Text>
-            <Text style={styles.infoValue}>{MODE_LABELS[mode.mode] ?? mode.mode}</Text>
-          </View>
-        )}
+        <InfoRow
+          label="Tonalidad"
+          value={tonality ? `${tonality.key} ${tonality.mode === 'major' ? 'mayor' : 'menor'}` : null}
+        />
+        <InfoRow
+          label="Modo"
+          value={mode ? (MODE_LABELS[mode.mode] ?? mode.mode) : null}
+        />
       </View>
 
       {error && <Text style={styles.errorText}>{error}</Text>}
 
+      {/* Button */}
       <TouchableOpacity
         style={[styles.button, isRecording && styles.buttonStop]}
         onPress={isRecording ? stop : start}
-        activeOpacity={0.8}
+        activeOpacity={0.75}
       >
         <Text style={styles.buttonText}>{isRecording ? 'Detener' : 'Iniciar'}</Text>
       </TouchableOpacity>
+    </View>
+  );
+}
+
+function InfoRow({ label, value }: { label: string; value: string | null }) {
+  return (
+    <View style={styles.infoRow}>
+      <Text style={styles.infoLabel}>{label}</Text>
+      <Text style={[styles.infoValue, !value && styles.infoEmpty]}>
+        {value ?? '—'}
+      </Text>
     </View>
   );
 }
@@ -72,88 +93,90 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#0a0a0f',
     alignItems: 'center',
-    justifyContent: 'center',
-    padding: 32,
+    justifyContent: 'space-between',
+    paddingTop: 64,
+    paddingBottom: 52,
+    paddingHorizontal: 32,
+  },
+
+  // Header
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
   },
   appName: {
-    position: 'absolute',
-    top: 64,
-    fontSize: 13,
+    fontSize: 12,
     letterSpacing: 8,
-    color: '#444',
+    color: '#3a3a4a',
     fontWeight: '600',
   },
-  chordBox: {
-    alignItems: 'center',
-    marginBottom: 48,
-  },
-  chordText: {
-    fontSize: 96,
-    fontWeight: '200',
-    color: '#f5f5f5',
-    lineHeight: 104,
-  },
-  qualityText: {
-    fontSize: 16,
-    color: '#666',
-    marginTop: 4,
-    textTransform: 'uppercase',
-    letterSpacing: 2,
-  },
-  confidenceTrack: {
-    width: 180,
-    height: 3,
-    backgroundColor: '#1e1e2e',
-    borderRadius: 2,
-    marginTop: 20,
-    overflow: 'hidden',
-  },
-  confidenceFill: {
-    height: '100%',
+  dot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
     backgroundColor: '#7c3aed',
-    borderRadius: 2,
   },
+  dotOff: {
+    backgroundColor: '#2a2a3a',
+  },
+
+  // Chord
+  chordArea: {
+    flex: 1,
+    justifyContent: 'center',
+  },
+
+  // Info
   infoBlock: {
     width: '100%',
-    gap: 10,
-    marginBottom: 16,
+    gap: 8,
+    marginBottom: 32,
   },
   infoRow: {
     flexDirection: 'row',
     justifyContent: 'center',
-    gap: 12,
+    gap: 16,
   },
   infoLabel: {
-    fontSize: 13,
-    color: '#444',
-    width: 80,
+    fontSize: 12,
+    color: '#333',
+    width: 76,
     textAlign: 'right',
+    letterSpacing: 0.5,
   },
   infoValue: {
-    fontSize: 13,
-    color: '#aaa',
-    width: 160,
+    fontSize: 12,
+    color: '#888',
+    width: 140,
+    letterSpacing: 0.5,
   },
+  infoEmpty: {
+    color: '#2a2a3a',
+  },
+
   errorText: {
     color: '#f87171',
-    fontSize: 13,
+    fontSize: 12,
     marginBottom: 16,
     textAlign: 'center',
   },
+
+  // Button
   button: {
-    marginTop: 48,
-    paddingHorizontal: 40,
-    paddingVertical: 16,
+    paddingHorizontal: 48,
+    paddingVertical: 15,
     borderRadius: 32,
     backgroundColor: '#7c3aed',
   },
   buttonStop: {
-    backgroundColor: '#991b1b',
+    backgroundColor: '#7f1d1d',
   },
   buttonText: {
     color: '#fff',
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: '600',
-    letterSpacing: 1,
+    letterSpacing: 1.5,
+    textTransform: 'uppercase',
   },
 });

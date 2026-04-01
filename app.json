@@ -41,9 +41,11 @@
     "plugins": [
       "expo-router",
       [
-        "expo-av",
+        "expo-build-properties",
         {
-          "microphonePermission": "Lumina necesita el micrófono para detectar acordes en tiempo real."
+          "android": {
+            "kotlinVersion": "1.9.25"
+          }
         }
       ]
     ],
