@@ -7,7 +7,10 @@
       "Bash(python -c \"import sys,json; vs=json.load\\(sys.stdin\\); print\\([v for v in vs if v.startswith\\('0.12'\\)]\\)\")",
       "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); deps=d.get\\('dependencies',{}\\); print\\({k:v for k,v in deps.items\\(\\) if 'react-native' in k or 'build-prop' in k}\\)\")",
       "Bash(python -c \"import sys,json; vs=json.load\\(sys.stdin\\); print\\(vs[-10:]\\)\")",
-      "Bash(python -c \"import sys,json; vs=json.load\\(sys.stdin\\); print\\([v for v in vs if v.startswith\\('14.'\\)]\\)\")"
+      "Bash(python -c \"import sys,json; vs=json.load\\(sys.stdin\\); print\\([v for v in vs if v.startswith\\('14.'\\)]\\)\")",
+      "Bash(python -c \"import sys,json; vs=json.load\\(sys.stdin\\); print\\([v for v in vs if v.startswith\\('10.'\\)]\\)\")",
+      "Bash(python -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(d['version']\\)\")",
+      "Bash(python -c \"import sys,json; vs=json.load\\(sys.stdin\\); stable=[v for v in vs if 'nightly' not in v and 'alpha' not in v and 'beta' not in v and 'rc' not in v]; print\\(stable[-10:]\\)\")"
     ]
   }
 }
