@@ -17,7 +17,7 @@ const MODE_LABELS: Record<string, string> = {
 };
 
 export default function HomeScreen() {
-  const { chord, tonality, mode, isRecording, error, start, stop } = useChordDetection();
+  const { chord, tonality, mode, chordHistory, isRecording, error, start, stop } = useChordDetection();
 
   // Recording pulse dot
   const pulseAnim = useRef(new Animated.Value(1)).current;
@@ -49,6 +49,24 @@ export default function HomeScreen() {
       {/* Main chord */}
       <View style={styles.chordArea}>
         <ChordDisplay chord={chord} isActive={isRecording} />
+      </View>
+
+      {/* Chord history */}
+      <View style={styles.historyRow}>
+        {chordHistory.map((name, i) => {
+          const opacities = [0.2, 0.38, 0.62, 1.0];
+          const offset = chordHistory.length - 1 - i; // 0 = newest
+          const opacity = opacities[Math.min(offset, opacities.length - 1)];
+          const isNewest = i === chordHistory.length - 1;
+          return (
+            <View key={i} style={styles.historyItem}>
+              {i > 0 && <Text style={[styles.historySep, { opacity }]}>›</Text>}
+              <View style={[styles.historyPill, isNewest && styles.historyPillActive]}>
+                <Text style={[styles.historyChord, { opacity }]}>{name}</Text>
+              </View>
+            </View>
+          );
+        })}
       </View>
 
       {/* Key + mode */}
@@ -125,6 +143,41 @@ const styles = StyleSheet.create({
   chordArea: {
     flex: 1,
     justifyContent: 'center',
+  },
+
+  // Chord history
+  historyRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 28,
+    minHeight: 32,
+    gap: 4,
+  },
+  historyItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  historySep: {
+    color: '#3a3a4a',
+    fontSize: 14,
+  },
+  historyPill: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#1e1e2e',
+  },
+  historyPillActive: {
+    borderColor: '#7c3aed',
+  },
+  historyChord: {
+    color: '#c0c0d0',
+    fontSize: 13,
+    fontWeight: '500',
+    letterSpacing: 0.5,
   },
 
   // Info
