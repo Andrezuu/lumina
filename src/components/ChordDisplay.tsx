@@ -5,6 +5,8 @@ import type { ChordResult } from '../lib/chordDetection';
 interface Props {
   chord: ChordResult | null;
   isActive: boolean;
+  hasSignal: boolean;
+  rmsDb: number;
 }
 
 const QUALITY_LABELS: Record<string, string> = {
@@ -19,10 +21,11 @@ const QUALITY_LABELS: Record<string, string> = {
   sus4:       'sus 4',
 };
 
-export function ChordDisplay({ chord, isActive }: Props) {
-  const scaleAnim    = useRef(new Animated.Value(1)).current;
-  const opacityAnim  = useRef(new Animated.Value(0.15)).current;
+export function ChordDisplay({ chord, isActive, hasSignal, rmsDb }: Props) {
+  const scaleAnim      = useRef(new Animated.Value(1)).current;
+  const opacityAnim    = useRef(new Animated.Value(0.15)).current;
   const confidenceAnim = useRef(new Animated.Value(0)).current;
+  const signalAnim     = useRef(new Animated.Value(0)).current;
 
   // Pop-in when chord name changes
   useEffect(() => {
@@ -61,11 +64,26 @@ export function ChordDisplay({ chord, isActive }: Props) {
     Animated.timing(confidenceAnim, {
       toValue: chord?.confidence ?? 0,
       duration: 220,
-      useNativeDriver: false, // width % can't use native driver
+      useNativeDriver: false,
     }).start();
   }, [chord?.confidence, confidenceAnim]);
 
+  // Signal / RMS bar — maps -60 dBFS..0 dBFS → 0..1
+  useEffect(() => {
+    const normalized = isFinite(rmsDb) ? Math.max(0, Math.min(1, (rmsDb + 60) / 60)) : 0;
+    Animated.timing(signalAnim, {
+      toValue: normalized,
+      duration: 80,
+      useNativeDriver: false,
+    }).start();
+  }, [rmsDb, signalAnim]);
+
   const barWidth = confidenceAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: ['0%', '100%'],
+  });
+
+  const signalBarWidth = signalAnim.interpolate({
     inputRange: [0, 1],
     outputRange: ['0%', '100%'],
   });
@@ -89,8 +107,23 @@ export function ChordDisplay({ chord, isActive }: Props) {
         {qualityLabel || ' '}
       </Text>
 
+      {/* Confidence bar */}
       <View style={styles.track}>
         <Animated.View style={[styles.fill, { width: barWidth }]} />
+      </View>
+
+      {/* Signal / RMS bar — shows if there's audio input */}
+      <View style={styles.signalRow}>
+        <View style={[styles.signalDot, hasSignal && styles.signalDotActive]} />
+        <View style={styles.signalTrack}>
+          <Animated.View
+            style={[
+              styles.signalFill,
+              hasSignal && styles.signalFillActive,
+              { width: signalBarWidth },
+            ]}
+          />
+        </View>
       </View>
     </View>
   );
@@ -129,5 +162,35 @@ const styles = StyleSheet.create({
     height: '100%',
     backgroundColor: '#7c3aed',
     borderRadius: 1,
+  },
+  signalRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 10,
+    gap: 8,
+  },
+  signalDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#2a2a3a',
+  },
+  signalDotActive: {
+    backgroundColor: '#22c55e',
+  },
+  signalTrack: {
+    width: 100,
+    height: 2,
+    backgroundColor: '#1c1c28',
+    borderRadius: 1,
+    overflow: 'hidden',
+  },
+  signalFill: {
+    height: '100%',
+    backgroundColor: '#2a2a3a',
+    borderRadius: 1,
+  },
+  signalFillActive: {
+    backgroundColor: '#22c55e',
   },
 });

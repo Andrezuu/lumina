@@ -53,6 +53,19 @@ function hannWindow(input: Float32Array, output: Float32Array): void {
 }
 
 /**
+ * Computes Root Mean Square energy of a PCM buffer and returns it in dBFS.
+ * Returns -Infinity when the buffer is silent (all zeros).
+ * Useful as a voice-activity / silence gate before chord detection.
+ */
+export function computeRMS(samples: Float32Array): number {
+  if (samples.length === 0) return -Infinity;
+  let sum = 0;
+  for (let i = 0; i < samples.length; i++) sum += samples[i] * samples[i];
+  const rms = Math.sqrt(sum / samples.length);
+  return rms > 0 ? 20 * Math.log10(rms) : -Infinity;
+}
+
+/**
  * Builds a 12-bin chromagram (one value per pitch class C..B) from PCM samples.
  * @param samples Float32Array of PCM samples in [-1, 1]
  * @returns Normalized Float32Array[12]

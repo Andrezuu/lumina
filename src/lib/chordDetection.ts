@@ -3,6 +3,8 @@ export interface ChordResult {
   root: string;
   quality: string;
   confidence: number;
+  /** Signal energy in dBFS at the moment of detection. Used by the UI silence gate. */
+  rmsDb: number;
 }
 
 const NOTE_NAMES = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
@@ -39,8 +41,10 @@ function templateWeight(template: number[]): number {
 /**
  * Identifies the most likely chord from a 12-bin chroma vector.
  * Uses normalized dot-product (cosine-like) scoring.
+ * @param chroma  12-bin normalized chroma vector
+ * @param rmsDb   Signal energy in dBFS (from computeRMS), forwarded into the result
  */
-export function detectChord(chroma: Float32Array): ChordResult {
+export function detectChord(chroma: Float32Array, rmsDb = 0): ChordResult {
   let bestChord = 'N';
   let bestRoot = 'N';
   let bestQuality = 'none';
@@ -63,5 +67,5 @@ export function detectChord(chroma: Float32Array): ChordResult {
     }
   }
 
-  return { chord: bestChord, root: bestRoot, quality: bestQuality, confidence: bestScore };
+  return { chord: bestChord, root: bestRoot, quality: bestQuality, confidence: bestScore, rmsDb };
 }
