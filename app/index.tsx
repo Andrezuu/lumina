@@ -13,6 +13,7 @@ import { useChordDetection } from '../src/hooks/useChordDetection';
 import type { ChordHistoryEntry } from '../src/hooks/useChordDetection';
 import { ChordDisplay } from '../src/components/ChordDisplay';
 import { CircleOfFifths } from '../src/components/CircleOfFifths';
+import { CanvasBoard } from '../src/components/CanvasBoard';
 import {
   getKeyInfo,
   getPosition,
@@ -57,7 +58,7 @@ export default function HomeScreen() {
     useChordDetection();
 
   // View state
-  const [activeView, setActiveView] = useState<'detector' | 'circulo'>('detector');
+  const [activeView, setActiveView] = useState<'detector' | 'circulo' | 'lienzo'>('detector');
 
   // Edit chord modal
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
@@ -134,7 +135,7 @@ export default function HomeScreen() {
 
       {/* Tab toggle */}
       <View style={styles.tabRow}>
-        {(['detector', 'circulo'] as const).map(tab => (
+        {(['detector', 'circulo', 'lienzo'] as const).map(tab => (
           <TouchableOpacity
             key={tab}
             style={[styles.tab, activeView === tab && styles.tabActive]}
@@ -142,7 +143,7 @@ export default function HomeScreen() {
             activeOpacity={0.7}
           >
             <Text style={[styles.tabText, activeView === tab && styles.tabTextActive]}>
-              {tab === 'detector' ? 'Detector' : 'Círculo'}
+              {tab === 'detector' ? 'Detector' : tab === 'circulo' ? 'Círculo' : 'Lienzo'}
             </Text>
           </TouchableOpacity>
         ))}
@@ -198,6 +199,12 @@ export default function HomeScreen() {
             />
           </View>
         </>
+      ) : activeView === 'lienzo' ? (
+        /* ── Lienzo view ──────────────────────────────────────── */
+        <CanvasBoard
+          chordHistory={chordHistory}
+          tonality={tonality}
+        />
       ) : (
         /* ── Círculo view ─────────────────────────────────────── */
         <View style={styles.circleArea}>
@@ -268,8 +275,8 @@ export default function HomeScreen() {
 
       {error && <Text style={styles.errorText}>{error}</Text>}
 
-      {/* Start / Stop + Reset buttons — hidden in manual mode */}
-      {!manualMode && (
+      {/* Start / Stop + Reset buttons — hidden only in Circle manual mode */}
+      {!(activeView === 'circulo' && manualMode) && (
         <View style={styles.buttonRow}>
           {isRecording && (
             <TouchableOpacity
