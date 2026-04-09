@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAudioStream } from './useAudioStream';
 import { buildChromagram, computeRMS } from '../lib/chromagram';
 import { detectChord, ChordResult } from '../lib/chordDetection';
@@ -231,21 +231,39 @@ export function useChordDetection(opts?: {
       mode = detectMode(avgChroma, tonality.key);
     }
 
-    setState(prev => ({
-      ...prev,
-      chord:       smoothedChord ?? prev.chord,
-      chroma,
-      tonality,
-      mode,
-      chordHistory: confirmedChordsRef.current.map(e => ({ chord: e.chord.chord, edited: false })),
-      rmsDb,
-      hasSignal,
+    setState(prev => {
       // Calibration buffer: unique chord names from the confirmed history,
-      // capped at CALIBRATION_SIZE. The UI reads this to drive the counter.
-      calibrationBuffer: [
+      // capped at CALIBRATION_SIZE.
+      // IMPORTANT: reuse the previous array reference when the content hasn't
+      // changed so that consumers' useEffect dependency arrays don't fire on
+      // every audio frame (which would cause infinite re-render loops).
+      const nextBuffer = [
         ...new Set(confirmedChordsRef.current.map(e => e.chord.chord)),
-      ].slice(0, CALIBRATION_SIZE),
-    }));
+      ].slice(0, CALIBRATION_SIZE);
+
+      const bufferChanged =
+        nextBuffer.length !== prev.calibrationBuffer.length ||
+        nextBuffer.some((v, i) => v !== prev.calibrationBuffer[i]);
+
+      // chordHistory: reuse the previous array reference when content hasn't changed
+      // to avoid cascading re-renders in consumers that depend on this array.
+      const nextHistory = confirmedChordsRef.current.map(e => ({ chord: e.chord.chord, edited: false }));
+      const historyChanged =
+        nextHistory.length !== prev.chordHistory.length ||
+        nextHistory.some((v, i) => v.chord !== prev.chordHistory[i]?.chord);
+
+      return {
+        ...prev,
+        chord:       smoothedChord ?? prev.chord,
+        chroma,
+        tonality,
+        mode,
+        chordHistory: historyChanged ? nextHistory : prev.chordHistory,
+        rmsDb,
+        hasSignal,
+        calibrationBuffer: bufferChanged ? nextBuffer : prev.calibrationBuffer,
+      };
+    });
   }, [samples]);
 
   useEffect(() => {
@@ -288,15 +306,17 @@ export function useChordDetection(opts?: {
    * Re-computes tonality for the given chord names using the representative
    * chroma vectors stored during audio processing.
    * Falls back to the current state tonality when a chord has no stored chroma.
+   * Wrapped in useCallback so the function reference is stable across renders.
    */
-  const recomputeTonalityForChords = (names: string[]): TonalityResult | null => {
+  const recomputeTonalityForChords = useCallback((names: string[]): TonalityResult | null => {
     const map = chordChromaMapRef.current;
     const chromas: Float32Array[] = names
       .map(n => map.get(n))
       .filter((c): c is Float32Array => c !== undefined);
     if (chromas.length === 0) return state.tonality;
     return detectTonality(chromas);
-  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // refs are stable; state.tonality is read inside so we intentionally omit it
 
   return { ...state, start, stop, resetHistory, editChord, recomputeTonalityForChords };
 }

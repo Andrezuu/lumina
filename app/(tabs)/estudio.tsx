@@ -21,7 +21,10 @@ import {
   Text,
   TouchableOpacity,
   View,
+  Dimensions,
 } from 'react-native';
+
+const SCREEN_HEIGHT = Dimensions.get('window').height;
 import { useRef, useEffect, useState, useMemo } from 'react';
 
 import { useChordDetection, CALIBRATION_SIZE, TonalityResult } from '../../src/hooks/useChordDetection';
@@ -111,7 +114,7 @@ export default function EstudioScreen() {
     if (phase !== 'CONFIRMING' || confirmedChords.length === 0) return;
     const recomputed = recomputeTonalityForChords(confirmedChords);
     setLocalTonality(recomputed);
-  }, [confirmedChords, phase]);
+  }, [confirmedChords, phase, recomputeTonalityForChords]);
 
   // ── Modal de edición de acorde (usado en RECORDING y en CONFIRMING) ────────
   const [editingIndex,    setEditingIndex]    = useState<number | null>(null);
@@ -394,38 +397,66 @@ export default function EstudioScreen() {
             />
           </View>
 
-          {/* ── Panel de Sugerencias Armónicas ── */}
+          {/* ── Botón flotante "Ruedas de Apoyo" — abre bottom-sheet modal ── */}
           {harmonicEngine.hasSuggestions && (
-            <View style={s.suggestionsWrap}>
-              <TouchableOpacity
-                style={s.suggestionsToggle}
-                onPress={() => setShowSuggestions(p => !p)}
-                activeOpacity={0.75}
-              >
-                <Text style={s.suggestionsToggleText}>
-                  {showSuggestions ? '▾ Ruedas de Apoyo' : '▸ Ruedas de Apoyo'}
-                </Text>
-              </TouchableOpacity>
-
-              {showSuggestions && (
-                <View style={s.suggestionsPanel}>
-                  <SuggestionRow label="Acordes de la tonalidad" items={harmonicEngine.diatonicScale} maxItems={7} />
-                  <View style={s.sugDivider} />
-                  <SuggestionRow label="Siguiente diatónico" items={harmonicEngine.diatonic} />
-                  <SuggestionRow label="Intercambio modal"   items={harmonicEngine.modal}    />
-                  <SuggestionRow label="Dominante secundario" items={harmonicEngine.secondary} />
-                  {harmonicEngine.deceptive.length > 0 && (
-                    <SuggestionRow label="Cadencia deceptiva" items={harmonicEngine.deceptive} />
-                  )}
-                  {harmonicEngine.texture.length > 0 && (
-                    <SuggestionRow label="Textura"           items={harmonicEngine.texture}   />
-                  )}
-                </View>
-              )}
-            </View>
+            <TouchableOpacity
+              style={s.suggestionsToggle}
+              onPress={() => setShowSuggestions(p => !p)}
+              activeOpacity={0.75}
+            >
+              <Text style={s.suggestionsToggleText}>
+                ✦ Ruedas de Apoyo
+              </Text>
+            </TouchableOpacity>
           )}
         </>
       )}
+
+      {/* ══════════════════════════════════════════════════════════
+          BOTTOM-SHEET: Ruedas de Apoyo
+      ══════════════════════════════════════════════════════════ */}
+      <Modal
+        visible={showSuggestions}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setShowSuggestions(false)}
+      >
+        <TouchableOpacity
+          style={s.sugBackdrop}
+          activeOpacity={1}
+          onPress={() => setShowSuggestions(false)}
+        >
+          <TouchableOpacity activeOpacity={1} style={s.sugSheet}>
+            <View style={s.sugHandle} />
+            <Text style={s.sugSheetTitle}>Ruedas de Apoyo</Text>
+
+            <ScrollView
+              showsVerticalScrollIndicator={false}
+              contentContainerStyle={s.sugSheetContent}
+            >
+              <SuggestionRow label="Acordes de la tonalidad" items={harmonicEngine.diatonicScale} maxItems={7} />
+              <View style={s.sugDivider} />
+              <SuggestionRow label="Siguiente diatónico"    items={harmonicEngine.diatonic} />
+              <SuggestionRow label="Intercambio modal"       items={harmonicEngine.modal}    />
+              <SuggestionRow label="Dominante secundario"   items={harmonicEngine.secondary} />
+              {harmonicEngine.deceptive.length > 0 && (
+                <SuggestionRow label="Cadencia deceptiva"   items={harmonicEngine.deceptive} />
+              )}
+              {harmonicEngine.texture.length > 0 && (
+                <SuggestionRow label="Textura"              items={harmonicEngine.texture}   />
+              )}
+            </ScrollView>
+
+            <TouchableOpacity
+              style={s.sugCloseBtn}
+              onPress={() => setShowSuggestions(false)}
+              activeOpacity={0.8}
+            >
+              <Text style={s.sugCloseBtnText}>Cerrar</Text>
+            </TouchableOpacity>
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
 
       {error ? <Text style={s.errorText}>{error}</Text> : null}
 
@@ -705,7 +736,7 @@ const s = StyleSheet.create({
   historyEditDot:    { color: '#7c3aed', fontSize: 10 },
 
   // Info block
-  infoBlock:       { width: '100%', gap: 6, marginBottom: 20 },
+  infoBlock:       { width: '100%', gap: 6, marginBottom: 10 },
   infoRow:         { flexDirection: 'row', justifyContent: 'center', gap: 16 },
   infoLabel:       { fontSize: 11, color: '#1e1e2e', width: 72, textAlign: 'right', letterSpacing: 0.5 },
   infoValue:       { fontSize: 11, color: '#707090', width: 140, letterSpacing: 0.5 },
@@ -816,14 +847,57 @@ const s = StyleSheet.create({
   editorConfirmText:{ color: '#fff', fontSize: 13, fontWeight: '600' },
 
   // ── Panel de Sugerencias Armónicas ────────────────────────────────────────
-  suggestionsWrap: { width: '100%', marginBottom: 8 },
   suggestionsToggle: {
     alignSelf: 'center',
-    paddingHorizontal: 14, paddingVertical: 5,
-    borderRadius: 10, borderWidth: 1, borderColor: '#1e1e2e',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 18,
+    paddingVertical: 7,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#2a2060',
+    backgroundColor: '#12103a',
+    marginBottom: 8,
   },
-  suggestionsToggleText: { color: '#303050', fontSize: 10, letterSpacing: 1.5, textTransform: 'uppercase' },
-  suggestionsPanel: { marginTop: 10, gap: 10 },
+  suggestionsToggleText: { color: '#a080e0', fontSize: 11, letterSpacing: 1.5, textTransform: 'uppercase', fontWeight: '600' },
+
+  // Bottom-sheet de Ruedas de Apoyo
+  sugBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.75)',
+    justifyContent: 'flex-end',
+  },
+  sugSheet: {
+    backgroundColor: '#0c0c18',
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    borderTopWidth: 1,
+    borderTopColor: '#1e1e30',
+    paddingTop: 12,
+    paddingBottom: 48,
+    paddingHorizontal: 24,
+    maxHeight: SCREEN_HEIGHT * 0.65,
+  },
+  sugHandle: {
+    width: 36, height: 4, borderRadius: 2,
+    backgroundColor: '#1e1e2e', alignSelf: 'center', marginBottom: 16,
+  },
+  sugSheetTitle: {
+    color: '#505070', fontSize: 10, letterSpacing: 3,
+    textTransform: 'uppercase', textAlign: 'center', marginBottom: 16,
+  },
+  sugSheetContent: { gap: 10, paddingBottom: 8 },
+  sugCloseBtn: {
+    marginTop: 12,
+    alignSelf: 'center',
+    paddingHorizontal: 32,
+    paddingVertical: 11,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#1e1e2e',
+  },
+  sugCloseBtnText: { color: '#404060', fontSize: 13, fontWeight: '600' },
 
   // Cada fila de motor
   sugRow:      { gap: 4 },
