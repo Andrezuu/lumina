@@ -112,6 +112,38 @@ export async function createChords(
   return data.chords;
 }
 
+// ─── History & Stats ─────────────────────────────────────────────────────────
+
+export interface SessionWithBlocks extends Session {
+  blocks: (Block & { chords: ChordRecord[] })[];
+}
+
+export interface SessionStats {
+  totalSessions: number;
+  totalChords: number;
+  editedChords: number;
+  accuracyPct: number;          // (1 - editedChords/totalChords) * 100
+  favoriteTonality: string | null;
+}
+
+/**
+ * GET /api/v1/sessions/history
+ * Returns all completed sessions for the authenticated user, newest first.
+ */
+export async function getSessions(): Promise<SessionWithBlocks[]> {
+  const { data } = await apiClient.get<{ sessions: SessionWithBlocks[] }>('/sessions/history');
+  return data.sessions;
+}
+
+/**
+ * GET /api/v1/sessions/stats
+ * Returns aggregated stats for the authenticated user.
+ */
+export async function getSessionStats(): Promise<SessionStats> {
+  const { data } = await apiClient.get<{ stats: SessionStats }>('/sessions/stats');
+  return data.stats;
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /**
