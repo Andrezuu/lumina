@@ -6,15 +6,17 @@
  *   • state  — token, user, loading, error
  *   • actions — login(), register(), logout(), clearError()
  *
- * apiClient reads token via useAuthStore.getState().token, so there is
- * no circular-dependency risk: apiClient uses getState() (not a hook),
- * while the store uses apiClient (imported module).
+ * ── Cycle-free design ───────────────────────────────────────────────────────
+ * apiClient no longer imports this store. Instead, after the store is created
+ * we call setTokenGetter / setLogoutCallback so apiClient can read the token
+ * and trigger logout without a direct import dependency.
  */
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 
+import { setLogoutCallback, setTokenGetter } from '../lib/apiClient';
 import * as authService from '../services/authService';
 import type { AuthUser, LoginPayload, RegisterPayload } from '../services/authService';
 
@@ -79,3 +81,9 @@ export const useAuthStore = create<AuthState>()(
     },
   ),
 );
+
+// ─── Wire apiClient interceptors (cycle-free) ────────────────────────────────
+// apiClient has no import of this store. We push the getter/callback to it
+// once, right here, after the store is constructed.
+setTokenGetter(() => useAuthStore.getState().token);
+setLogoutCallback(() => useAuthStore.getState().logout());

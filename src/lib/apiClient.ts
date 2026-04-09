@@ -2,15 +2,30 @@
  * apiClient.ts
  *
  * Axios instance pre-configured for the Lumina backend.
- * The request interceptor automatically injects the Bearer token
- * stored in useAuthStore every time a request is made, so individual
- * service functions never have to handle headers manually.
+ *
+ * ── Cycle-free token injection ──────────────────────────────────────────────
+ * Instead of importing useAuthStore here (which creates a require cycle
+ * apiClient → useAuthStore → authService → apiClient), we use two
+ * setter functions that useAuthStore calls once after it is created:
+ *
+ *   setTokenGetter(() => useAuthStore.getState().token)
+ *   setLogoutCallback(() => useAuthStore.getState().logout())
+ *
+ * apiClient never imports the store; it just calls the registered callbacks.
  */
 
 import axios from 'axios';
-import { useAuthStore } from '../store/useAuthStore';
 
-// Change this to your real backend URL (env var recommended for production)
+// ─── Injected callbacks (set by useAuthStore after creation) ────────────────
+
+let _getToken:  () => string | null  = () => null;
+let _onLogout:  () => void           = () => {};
+
+export function setTokenGetter(fn: () => string | null) { _getToken = fn; }
+export function setLogoutCallback(fn: () => void)        { _onLogout = fn; }
+
+// ─── Axios instance ─────────────────────────────────────────────────────────
+
 const BASE_URL =
   (process.env as Record<string, string | undefined>).EXPO_PUBLIC_API_URL ??
   'http://10.0.2.2:3000/api/v1';
@@ -22,10 +37,8 @@ export const apiClient = axios.create({
 });
 
 // ─── Request interceptor ────────────────────────────────────────────────────
-// Reads the token from Zustand state (synchronous — no async needed)
-// and injects it into the Authorization header for every request.
 apiClient.interceptors.request.use(config => {
-  const token = useAuthStore.getState().token;
+  const token = _getToken();
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
@@ -33,12 +46,11 @@ apiClient.interceptors.request.use(config => {
 });
 
 // ─── Response interceptor ───────────────────────────────────────────────────
-// On 401 the session is considered expired: clear auth state.
 apiClient.interceptors.response.use(
   response => response,
   error => {
     if (error.response?.status === 401) {
-      useAuthStore.getState().logout();
+      _onLogout();
     }
     return Promise.reject(error);
   },
