@@ -278,3 +278,212 @@ export function getDiatonicChords(tonality: TonalityResult): ChordSuggestion[] {
     score: 1,
   }));
 }
+
+// ---------------------------------------------------------------------------
+// Motor 2: Intercambio Modal (Modal Interchange)
+// Borrows chords from the parallel minor (if in major) or parallel major
+// (if in minor) to add colour to the progression.
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns diatonic chords from the parallel mode that are NOT already in the
+ * current key — the classic "borrowed chord" technique.
+ *
+ * e.g. In C major → borrows Fm, Ab, Bb, Eb from C minor.
+ */
+export function modalInterchange(tonality: TonalityResult): ChordSuggestion[] {
+  const parallelMode = tonality.mode === 'major' ? 'minor' : 'major';
+  const parallelTable = buildDiatonicTable(tonality.key, parallelMode);
+  const homeTable     = buildDiatonicTable(tonality.key, tonality.mode);
+  const homeRoots     = new Set(homeTable.map(dc => dc.chord));
+
+  return parallelTable
+    .filter(dc => !homeRoots.has(dc.chord))
+    .map(dc => ({
+      chord:    dc.chord,
+      root:     dc.root,
+      quality:  dc.quality === 'M' ? 'major' : dc.quality === 'm' ? 'minor' : 'dim',
+      degree:   `♭${dc.degree}`,   // borrowed degrees often shown with ♭
+      function: 'subdominant' as HarmonicFunction,
+      score:    0.75,
+    }));
+}
+
+// ---------------------------------------------------------------------------
+// Motor 3: Dominantes Secundarios (Secondary Dominants)
+// For each diatonic chord (except the tonic), compute its secondary dominant:
+// the major chord a P5 above its root (V/X pattern).
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns secondary dominant chords (V/X) targeting each non-tonic diatonic degree.
+ *
+ * If `currentChord` is provided, only returns the secondary dominant of the
+ * chord that the current chord is most likely to resolve to (contextual mode).
+ * Otherwise returns all secondary dominants.
+ */
+export function secondaryDominants(
+  tonality: TonalityResult,
+  currentChord?: string,
+): ChordSuggestion[] {
+  const table = buildDiatonicTable(tonality.key, tonality.mode);
+
+  // Targets: every diatonic degree except tonic (index 0)
+  const targets = table.filter((_, i) => i !== 0);
+
+  const results: ChordSuggestion[] = targets.map(target => {
+    // Secondary dominant root = P5 above target root (7 semitones)
+    const secDomRoot = noteAt(target.root, 7);
+    const chord      = `${secDomRoot}7`;     // always a dominant 7th
+    return {
+      chord,
+      root:     secDomRoot,
+      quality:  'dom7',
+      degree:   `V7/${target.degree}`,
+      function: 'dominant' as HarmonicFunction,
+      score:    0.80,
+    };
+  });
+
+  if (!currentChord) return results;
+
+  // Contextual: boost the secondary dominant that resolves to the chord a diatonic 4th above current
+  const currentDeg = findDegree(currentChord, table);
+  if (currentDeg === -1) return results;
+
+  // The most natural resolution target is a P4 above (diatonic index + 3)
+  const nextTargetIdx = (currentDeg + 3) % 7;
+
+  return results
+    .map(r => {
+      const targetDeg = targets.find(t => r.root === noteAt(t.root, 7))?.degreeIndex;
+      return { ...r, score: targetDeg === nextTargetIdx ? 1.0 : r.score };
+    })
+    .sort((a, b) => b.score - a.score);
+}
+
+// ---------------------------------------------------------------------------
+// Motor 4: Cadencia Deceptiva (Deceptive Cadence)
+// When the current chord is a V (or V7), suggest resolving to vi instead of I.
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns the deceptive cadence target (vi in major, VI in minor) when the
+ * current chord is a dominant (V / V7) in the given tonality.
+ *
+ * Returns an empty array when the current chord is not a dominant.
+ */
+export function deceptiveCadence(
+  tonality: TonalityResult,
+  currentChord: string,
+): ChordSuggestion[] {
+  if (!currentChord) return [];
+
+  const table = buildDiatonicTable(tonality.key, tonality.mode);
+
+  // Check if current chord is the V degree (dominant)
+  const normalised = currentChord.replace(/7$/, ''); // strip "7" for triad lookup
+  const dominantDeg = tonality.mode === 'major' ? 4 : 4; // V is always index 4
+
+  const isDominant =
+    findDegree(currentChord, table) === dominantDeg ||
+    findDegree(normalised, table)   === dominantDeg;
+
+  if (!isDominant) return [];
+
+  // vi degree (major) or VI degree (minor) — index 5
+  const vi = table[5];
+  return [
+    {
+      chord:    vi.chord,
+      root:     vi.root,
+      quality:  vi.quality === 'M' ? 'major' : vi.quality === 'm' ? 'minor' : 'dim',
+      degree:   `${vi.degree} (engaño)`,
+      function: 'tonic' as HarmonicFunction,
+      score:    0.90,
+    },
+  ];
+}
+
+// ---------------------------------------------------------------------------
+// Motor 5: Sugerencias de Textura (Texture Suggestions)
+// When the same chord has been repeated, suggest sus2/sus4 variants or the
+// chord a minor 3rd above (colour substitution).
+// ---------------------------------------------------------------------------
+
+/**
+ * Suggests textural variations when a chord appears ≥ `repeatThreshold` times
+ * consecutively in the history.
+ *
+ * Variants produced:
+ *  • sus2  (replace 3rd with major 2nd)
+ *  • sus4  (replace 3rd with perfect 4th)
+ *  • add9  (add major 2nd without replacing 3rd)
+ *  • tritone substitution root (b5 of dominant chords)
+ */
+export function textureSuggestions(
+  chordHistory: string[],
+  repeatThreshold = 2,
+): ChordSuggestion[] {
+  if (chordHistory.length < repeatThreshold) return [];
+
+  // Count how many of the last N chords are the same
+  const last = chordHistory[chordHistory.length - 1];
+  let streak = 0;
+  for (let i = chordHistory.length - 1; i >= 0; i--) {
+    if (chordHistory[i] === last) streak++;
+    else break;
+  }
+
+  if (streak < repeatThreshold) return [];
+
+  const m = last.match(/^([A-G][#b]?)(.*)/);
+  if (!m) return [];
+  const root    = m[1];
+  const quality = m[2];
+
+  const suggestions: ChordSuggestion[] = [
+    // sus2 — always applicable
+    {
+      chord:    `${root}sus2`,
+      root,
+      quality:  'sus2',
+      degree:   'sus2',
+      function: 'tonic' as HarmonicFunction,
+      score:    0.70,
+    },
+    // sus4
+    {
+      chord:    `${root}sus4`,
+      root,
+      quality:  'sus4',
+      degree:   'sus4',
+      function: 'tonic' as HarmonicFunction,
+      score:    0.65,
+    },
+    // add9
+    {
+      chord:    `${root}add9`,
+      root,
+      quality:  'add9',
+      degree:   'add9',
+      function: 'tonic' as HarmonicFunction,
+      score:    0.60,
+    },
+  ];
+
+  // Tritone substitution: only for dominant (7th) chords
+  if (quality === '7' || quality === 'dom7') {
+    const tritoneRoot = noteAt(root, 6); // b5 interval
+    suggestions.push({
+      chord:    `${tritoneRoot}7`,
+      root:     tritoneRoot,
+      quality:  'dom7',
+      degree:   '♭II7 (tritono)',
+      function: 'dominant' as HarmonicFunction,
+      score:    0.85,
+    });
+  }
+
+  return suggestions;
+}

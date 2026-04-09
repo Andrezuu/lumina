@@ -1,12 +1,18 @@
 /**
- * app/(tabs)/teoria.tsx
+ * app/(tabs)/teoria.tsx  (Tab 3 — Círculo de Quintas)
  *
- * Pantalla de referencia de teoría musical.
- * Placeholder estructurado — contenido expandible en iteraciones futuras.
+ * El CircleOfFifths vive aquí de forma completamente independiente:
+ *   • Estado local propio (modo manual / progresión personalizada)
+ *   • Sin conexión al detector de acordes del Tab 2
+ *   • Sin imports de useChordDetection ni useAudioStream
+ *
+ * Esto garantiza que navegar a esta pestaña no afecta al rendimiento
+ * del detector en tiempo real.
  */
 
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
+  Modal,
   ScrollView,
   StyleSheet,
   Text,
@@ -14,133 +20,253 @@ import {
   View,
 } from 'react-native';
 
-// ─── Datos de referencia ─────────────────────────────────────────────────────
-
-const INTERVALS = [
-  { name: 'Unísono',          semitones: 0,  symbol: 'P1'  },
-  { name: 'Segunda menor',    semitones: 1,  symbol: 'm2'  },
-  { name: 'Segunda mayor',    semitones: 2,  symbol: 'M2'  },
-  { name: 'Tercera menor',    semitones: 3,  symbol: 'm3'  },
-  { name: 'Tercera mayor',    semitones: 4,  symbol: 'M3'  },
-  { name: 'Cuarta justa',     semitones: 5,  symbol: 'P4'  },
-  { name: 'Tritono',          semitones: 6,  symbol: 'TT'  },
-  { name: 'Quinta justa',     semitones: 7,  symbol: 'P5'  },
-  { name: 'Sexta menor',      semitones: 8,  symbol: 'm6'  },
-  { name: 'Sexta mayor',      semitones: 9,  symbol: 'M6'  },
-  { name: 'Séptima menor',    semitones: 10, symbol: 'm7'  },
-  { name: 'Séptima mayor',    semitones: 11, symbol: 'M7'  },
-  { name: 'Octava',           semitones: 12, symbol: 'P8'  },
-];
-
-const MODES = [
-  { name: 'Jónico (mayor)',   formula: 'T T S T T T S',   feel: 'Alegre, brillante'    },
-  { name: 'Dórico',           formula: 'T S T T T S T',   feel: 'Melancólico, jazzístico' },
-  { name: 'Frigio',           formula: 'S T T T S T T',   feel: 'Oscuro, flamenco'     },
-  { name: 'Lidio',            formula: 'T T T S T T S',   feel: 'Etéreo, soñador'      },
-  { name: 'Mixolidio',        formula: 'T T S T T S T',   feel: 'Dominante, blues'     },
-  { name: 'Eólico (menor)',   formula: 'T S T T S T T',   feel: 'Triste, natural'      },
-  { name: 'Locrio',           formula: 'S T T S T T T',   feel: 'Inestable, disonante' },
-];
-
-const CHORD_TYPES = [
-  { name: 'Mayor',          symbol: '',     formula: '1 – 3 – 5'       },
-  { name: 'Menor',          symbol: 'm',    formula: '1 – ♭3 – 5'      },
-  { name: 'Dominante 7',    symbol: '7',    formula: '1 – 3 – 5 – ♭7'  },
-  { name: 'Mayor 7',        symbol: 'maj7', formula: '1 – 3 – 5 – 7'   },
-  { name: 'Menor 7',        symbol: 'm7',   formula: '1 – ♭3 – 5 – ♭7' },
-  { name: 'Disminuido',     symbol: 'dim',  formula: '1 – ♭3 – ♭5'     },
-  { name: 'Aumentado',      symbol: 'aug',  formula: '1 – 3 – ♯5'      },
-  { name: 'Suspendido 2',   symbol: 'sus2', formula: '1 – 2 – 5'       },
-  { name: 'Suspendido 4',   symbol: 'sus4', formula: '1 – 4 – 5'       },
-];
-
-// ─── Sección colapsable ──────────────────────────────────────────────────────
-
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
-  const [open, setOpen] = useState(true);
-  return (
-    <View style={s.section}>
-      <TouchableOpacity style={s.sectionHeader} onPress={() => setOpen(v => !v)} activeOpacity={0.7}>
-        <Text style={s.sectionTitle}>{title}</Text>
-        <Text style={s.sectionArrow}>{open ? '▾' : '▸'}</Text>
-      </TouchableOpacity>
-      {open && <View style={s.sectionBody}>{children}</View>}
-    </View>
-  );
-}
+import { CircleOfFifths } from '../../src/components/CircleOfFifths';
+import {
+  getKeyInfo,
+  type KeyInfo,
+} from '../../src/lib/circleOfFifths';
 
 // ─── Pantalla ────────────────────────────────────────────────────────────────
 
 export default function TeoriaScreen() {
+  // Modo de uso del círculo
+  const [manualMode, setManualMode]               = useState(true);
+  const [customProgression, setCustomProgression] = useState<string[]>([]);
+
+  // Segmento seleccionado → modal de info de tonalidad
+  const [selectedSegment, setSelectedSegment] =
+    useState<{ root: string; mode: 'major' | 'minor' } | null>(null);
+
+  const keyInfo: KeyInfo | null = useMemo(
+    () => selectedSegment
+      ? getKeyInfo(selectedSegment.root, selectedSegment.mode)
+      : null,
+    [selectedSegment],
+  );
+
+  const handleManualAdd = (label: string) => {
+    if (customProgression.length < 8)
+      setCustomProgression(prev => [...prev, label]);
+  };
+
   return (
-    <ScrollView style={s.root} contentContainerStyle={s.content} showsVerticalScrollIndicator={false}>
-      <Text style={s.pageTitle}>Teoría Musical</Text>
-      <Text style={s.pageSubtitle}>Referencia rápida para el estudio de acordes</Text>
+    <View style={s.root}>
 
-      {/* Intervalos */}
-      <Section title="Intervalos">
-        {INTERVALS.map(iv => (
-          <View key={iv.symbol} style={s.row}>
-            <View style={s.badge}><Text style={s.badgeText}>{iv.semitones}</Text></View>
-            <Text style={s.rowMain}>{iv.name}</Text>
-            <Text style={s.rowSub}>{iv.symbol}</Text>
-          </View>
+      {/* ── Cabecera ── */}
+      <View style={s.header}>
+        <Text style={s.title}>Círculo de Quintas</Text>
+        <Text style={s.subtitle}>Toca un segmento para explorar la tonalidad</Text>
+      </View>
+
+      {/* ── Toggle modo ── */}
+      <View style={s.modeRow}>
+        {([true, false] as const).map(isManual => (
+          <TouchableOpacity
+            key={String(isManual)}
+            style={[s.modeBtn, manualMode === isManual && s.modeBtnActive]}
+            onPress={() => setManualMode(isManual)}
+            activeOpacity={0.75}
+          >
+            <Text style={[s.modeBtnText, manualMode === isManual && s.modeBtnTextActive]}>
+              {isManual ? 'Manual' : 'Info'}
+            </Text>
+          </TouchableOpacity>
         ))}
-      </Section>
+      </View>
 
-      {/* Tipos de acordes */}
-      <Section title="Tipos de acordes">
-        {CHORD_TYPES.map(ct => (
-          <View key={ct.symbol || 'maj'} style={s.row}>
-            <View style={[s.badge, s.badgePurple]}>
-              <Text style={[s.badgeText, s.badgePurpleText]}>{ct.symbol || 'M'}</Text>
-            </View>
-            <Text style={s.rowMain}>{ct.name}</Text>
-            <Text style={s.rowSub}>{ct.formula}</Text>
+      {/* ── Círculo ── */}
+      <View style={s.circleWrap}>
+        <CircleOfFifths
+          tonality={null}
+          chord={null}
+          chordHistory={[]}
+          onSegmentPress={(root, mode) => setSelectedSegment({ root, mode })}
+          manualMode={manualMode}
+          customProgression={customProgression}
+          onManualAdd={handleManualAdd}
+        />
+      </View>
+
+      {/* ── Progresión manual ── */}
+      {manualMode && (
+        customProgression.length === 0 ? (
+          <Text style={s.progressionHint}>
+            Toca los segmentos para construir una progresión
+          </Text>
+        ) : (
+          <View style={s.progressionWrap}>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={s.progressionScroll}
+            >
+              {customProgression.map((label, i) => (
+                <View key={i} style={s.pill}>
+                  <Text style={s.pillText}>{label}</Text>
+                  <TouchableOpacity
+                    onPress={() =>
+                      setCustomProgression(prev => prev.filter((_, j) => j !== i))
+                    }
+                    hitSlop={{ top: 8, bottom: 8, left: 4, right: 8 }}
+                  >
+                    <Text style={s.pillX}>✕</Text>
+                  </TouchableOpacity>
+                </View>
+              ))}
+            </ScrollView>
+            <TouchableOpacity
+              style={s.clearBtn}
+              onPress={() => setCustomProgression([])}
+            >
+              <Text style={s.clearBtnText}>Limpiar</Text>
+            </TouchableOpacity>
           </View>
-        ))}
-      </Section>
+        )
+      )}
 
-      {/* Modos */}
-      <Section title="Modos de la escala mayor">
-        {MODES.map(m => (
-          <View key={m.name} style={s.modeCard}>
-            <Text style={s.modeName}>{m.name}</Text>
-            <Text style={s.modeFormula}>{m.formula}</Text>
-            <Text style={s.modeFeel}>{m.feel}</Text>
-          </View>
-        ))}
-      </Section>
+      {/* ── Modal: info de tonalidad (modo Info) ── */}
+      <Modal
+        visible={selectedSegment !== null && !manualMode}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setSelectedSegment(null)}
+      >
+        <TouchableOpacity
+          style={s.modalBackdrop}
+          activeOpacity={1}
+          onPress={() => setSelectedSegment(null)}
+        >
+          <TouchableOpacity activeOpacity={1} style={s.modalPanel}>
+            {keyInfo && <KeyInfoPanel info={keyInfo} />}
+          </TouchableOpacity>
+        </TouchableOpacity>
+      </Modal>
 
-    </ScrollView>
+    </View>
   );
 }
 
-// ─── Styles ──────────────────────────────────────────────────────────────────
+// ─── Panel de información de tonalidad ───────────────────────────────────────
+
+function KeyInfoPanel({ info }: { info: KeyInfo }) {
+  return (
+    <View style={s.panelContent}>
+      <View style={s.panelHandle} />
+      <Text style={s.panelTitle}>{info.displayName}</Text>
+
+      <Text style={s.panelLabel}>Escala</Text>
+      <View style={s.pillRow}>
+        {info.scale.map(note => (
+          <View key={note} style={s.notePill}>
+            <Text style={s.notePillText}>{note}</Text>
+          </View>
+        ))}
+      </View>
+
+      <Text style={s.panelLabel}>Acordes diatónicos</Text>
+      <View style={s.pillRow}>
+        {info.chords.map(c => (
+          <View key={c} style={s.chordPill}>
+            <Text style={s.chordPillText}>{c}</Text>
+          </View>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+// ─── Estilos ─────────────────────────────────────────────────────────────────
 
 const s = StyleSheet.create({
-  root:    { flex: 1, backgroundColor: '#06060f' },
-  content: { padding: 20, paddingTop: 60, paddingBottom: 48, gap: 16 },
+  root: {
+    flex: 1,
+    backgroundColor: '#06060f',
+    alignItems: 'center',
+    paddingTop: 56,
+    paddingBottom: 24,
+    paddingHorizontal: 20,
+    gap: 16,
+  },
 
-  pageTitle:    { color: '#c0b0f0', fontSize: 26, fontWeight: '700', letterSpacing: -0.3 },
-  pageSubtitle: { color: '#2a2a4a', fontSize: 12, marginTop: 4, marginBottom: 4 },
+  // Cabecera
+  header:   { alignItems: 'center', gap: 4, width: '100%' },
+  title:    { color: '#c0b0f0', fontSize: 22, fontWeight: '700', letterSpacing: -0.3 },
+  subtitle: { color: '#2a2a4a', fontSize: 12 },
 
-  section: { backgroundColor: '#0e0e1a', borderRadius: 18, borderWidth: 1, borderColor: '#1a1a2a', overflow: 'hidden' },
-  sectionHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 16, borderBottomWidth: 1, borderBottomColor: '#14142a' },
-  sectionTitle: { color: '#6060a0', fontSize: 11, fontWeight: '700', letterSpacing: 2, textTransform: 'uppercase' },
-  sectionArrow: { color: '#2a2a4a', fontSize: 14 },
-  sectionBody: { padding: 12, gap: 8 },
+  // Toggle modo
+  modeRow: {
+    flexDirection: 'row',
+    backgroundColor: '#0e0e18',
+    borderRadius: 16,
+    padding: 3,
+    gap: 2,
+  },
+  modeBtn: {
+    paddingHorizontal: 20,
+    paddingVertical: 7,
+    borderRadius: 13,
+  },
+  modeBtnActive:    { backgroundColor: '#1e1640' },
+  modeBtnText:      { fontSize: 11, color: '#2a2a4a', fontWeight: '600', letterSpacing: 1, textTransform: 'uppercase' },
+  modeBtnTextActive:{ color: '#c0b0f0' },
 
-  row: { flexDirection: 'row', alignItems: 'center', gap: 12, paddingVertical: 4 },
-  badge: { width: 32, height: 32, borderRadius: 8, backgroundColor: '#1a1a28', borderWidth: 1, borderColor: '#2a2a3a', alignItems: 'center', justifyContent: 'center' },
-  badgeText: { color: '#6060a0', fontSize: 11, fontWeight: '700' },
-  badgePurple: { backgroundColor: '#12103a', borderColor: '#2e2860' },
-  badgePurpleText: { color: '#a78bfa' },
-  rowMain: { color: '#8080a0', fontSize: 13, flex: 1 },
-  rowSub:  { color: '#30304a', fontSize: 11, fontFamily: 'monospace' },
+  // Círculo
+  circleWrap: { alignItems: 'center', justifyContent: 'center' },
 
-  modeCard: { backgroundColor: '#0a0a14', borderRadius: 12, borderWidth: 1, borderColor: '#1a1a2a', padding: 12, gap: 4 },
-  modeName:    { color: '#9090b0', fontSize: 13, fontWeight: '600' },
-  modeFormula: { color: '#404060', fontSize: 12, fontFamily: 'monospace' },
-  modeFeel:    { color: '#2a2a4a', fontSize: 11, fontStyle: 'italic' },
+  // Progresión manual
+  progressionHint: {
+    color: '#1e1e2e',
+    fontSize: 12,
+    textAlign: 'center',
+    letterSpacing: 0.5,
+  },
+  progressionWrap:  { width: '100%', alignItems: 'center', gap: 10 },
+  progressionScroll:{ paddingHorizontal: 4, gap: 8, flexDirection: 'row' },
+  pill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 14,
+    backgroundColor: '#10101a',
+    borderWidth: 1,
+    borderColor: '#1e1e2e',
+  },
+  pillText: { color: '#c0b0f0', fontSize: 13, fontWeight: '500' },
+  pillX:    { color: '#2a2a4a', fontSize: 11 },
+  clearBtn: {
+    paddingHorizontal: 16,
+    paddingVertical: 7,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#1a1a2a',
+  },
+  clearBtnText: { color: '#2a2a4a', fontSize: 11, letterSpacing: 1, textTransform: 'uppercase' },
+
+  // Modal
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    justifyContent: 'flex-end',
+  },
+  modalPanel: {
+    backgroundColor: '#0e0e18',
+    borderTopLeftRadius: 24,
+    borderTopRightRadius: 24,
+    borderTopWidth: 1,
+    borderTopColor: '#1a1a28',
+    paddingTop: 12,
+    paddingBottom: 48,
+    paddingHorizontal: 24,
+  },
+  panelContent:  { gap: 0 },
+  panelHandle:   { width: 36, height: 4, borderRadius: 2, backgroundColor: '#1e1e2e', alignSelf: 'center', marginBottom: 20 },
+  panelTitle:    { color: '#f0f0f5', fontSize: 22, fontWeight: '300', letterSpacing: 0.5, marginBottom: 4 },
+  panelLabel:    { color: '#2a2a4a', fontSize: 10, letterSpacing: 2, textTransform: 'uppercase', marginTop: 20, marginBottom: 10 },
+  pillRow:       { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  notePill:      { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8, backgroundColor: '#14141e', borderWidth: 1, borderColor: '#1e1e2e' },
+  notePillText:  { color: '#8080a0', fontSize: 13 },
+  chordPill:     { paddingHorizontal: 12, paddingVertical: 5, borderRadius: 8, backgroundColor: '#12103a', borderWidth: 1, borderColor: '#2a2060' },
+  chordPillText: { color: '#c0b8f0', fontSize: 13 },
 });

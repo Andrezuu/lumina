@@ -1,10 +1,15 @@
 /**
- * app/(tabs)/estudio.tsx
+ * app/(tabs)/estudio.tsx  (Tab 2 — El Estudio)
  *
- * Pantalla principal de práctica:
- *   • Detector de acordes en tiempo real
- *   • Círculo de quintas interactivo
- *   • Lienzo de estructura libre
+ * Máquina de estados de la sesión de estudio:
+ *
+ *   IDLE        → pantalla de espera, botón "Iniciar"
+ *   CALIBRATING → micrófono activo, contador "Escuchando acordes… (X/4)"
+ *                 El detector corre normalmente; observamos calibrationBuffer.
+ *                 Al llegar a 4 acordes únicos → CONFIRMING (audio sigue).
+ *   CONFIRMING  → modal bottom-sheet: tonalidad inferida + 4 acordes editables.
+ *                 Confirmar → RECORDING  |  Repetir → reset + CALIBRATING
+ *   RECORDING   → sesión activa, detector libre, historial expandible.
  */
 
 import { StatusBar } from 'expo-status-bar';
@@ -19,286 +24,567 @@ import {
 } from 'react-native';
 import { useRef, useEffect, useState, useMemo } from 'react';
 
-import { useChordDetection } from '../../src/hooks/useChordDetection';
-import type { ChordHistoryEntry } from '../../src/hooks/useChordDetection';
+import { useChordDetection, CALIBRATION_SIZE, TonalityResult } from '../../src/hooks/useChordDetection';
 import { ChordDisplay } from '../../src/components/ChordDisplay';
-import { CircleOfFifths } from '../../src/components/CircleOfFifths';
-import { CanvasBoard } from '../../src/components/CanvasBoard';
 import {
-  getKeyInfo,
-  getPosition,
-  MAJOR_DISPLAY,
-  MINOR_DISPLAY,
-  type KeyInfo,
-} from '../../src/lib/circleOfFifths';
+  createSession,
+  createBlock,
+  createChords,
+  parseChordName,
+  updateSession,
+  extractErrorMessage,
+} from '../../src/services/sessionService';
+import { useHarmonicEngine } from '../../src/hooks/useHarmonicEngine';
+import type { ChordSuggestion } from '../../src/lib/harmonicSuggestions';
 
-// ---------------------------------------------------------------------------
-// Spanish mode labels
-// ---------------------------------------------------------------------------
+// ─── Tipos ────────────────────────────────────────────────────────────────────
 
+type SessionPhase = 'IDLE' | 'CALIBRATING' | 'CONFIRMING' | 'RECORDING';
+
+// ─── Constantes ───────────────────────────────────────────────────────────────
+
+const EDIT_NOTES     = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'] as const;
+const EDIT_QUALITIES = ['', 'm', '7', 'maj7', 'm7', 'dim', 'aug', 'sus2', 'sus4'] as const;
+const QUALITY_LABELS: Record<string, string> = {
+  '': 'maj', m: 'm', '7': '7', maj7: 'maj7', m7: 'm7',
+  dim: 'dim', aug: 'aug', sus2: 'sus2', sus4: 'sus4',
+};
 const MODE_LABELS: Record<string, string> = {
-  ionian:         'Jónico',
-  dorian:         'Dórico',
-  phrygian:       'Frigio',
-  lydian:         'Lidio',
-  mixolydian:     'Mixolidio',
-  aeolian:        'Eólico',
-  locrian:        'Locrio',
-  harmonic_minor: 'Menor armónico',
-  melodic_minor:  'Menor melódico',
+  ionian: 'Jónico', dorian: 'Dórico', phrygian: 'Frigio',
+  lydian: 'Lidio', mixolydian: 'Mixolidio', aeolian: 'Eólico',
+  locrian: 'Locrio', harmonic_minor: 'Menor armónico', melodic_minor: 'Menor melódico',
 };
 
-function getRelative(root: string, mode: 'major' | 'minor'): string | null {
-  const pos = getPosition(root, mode);
-  if (pos === -1) return null;
-  if (mode === 'major') return `${MINOR_DISPLAY[pos]} menor`;
-  return `${MAJOR_DISPLAY[pos]} mayor`;
-}
-
-// ---------------------------------------------------------------------------
-// EstudioScreen
-// ---------------------------------------------------------------------------
+// ─── EstudioScreen ────────────────────────────────────────────────────────────
 
 export default function EstudioScreen() {
-  const { chord, tonality, mode, chordHistory, isRecording, error, start, stop, hasSignal, rmsDb, resetHistory, editChord } =
-    useChordDetection();
+  // ── Tonality lock ─────────────────────────────────────────────────────────
+  // Confirmed during the CONFIRMING modal; fed to the hook to bypass live detection.
+  const [isTonalityLocked, setIsTonalityLocked] = useState(false);
+  const [lockedTonality,   setLockedTonality]   = useState<TonalityResult | null>(null);
 
-  const [activeView, setActiveView] = useState<'detector' | 'circulo' | 'lienzo'>('detector');
+  // ── Backend session state ──────────────────────────────────────────────────
+  const [sessionId,    setSessionId]    = useState<string | null>(null);
+  const [blockId,      setBlockId]      = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [submitError,  setSubmitError]  = useState<string | null>(null);
 
-  // Edit chord modal
-  const [editingIndex, setEditingIndex] = useState<number | null>(null);
-  const [editRoot, setEditRoot]         = useState('C');
-  const [editQuality, setEditQuality]   = useState('');
+  // Panel de sugerencias — visible solo en RECORDING cuando hay sugerencias
+  const [showSuggestions, setShowSuggestions] = useState(false);
 
-  const EDIT_NOTES     = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
-  const EDIT_QUALITIES = ['', 'm', '7', 'maj7', 'm7', 'dim', 'aug', 'sus2', 'sus4'];
-  const QUALITY_LABELS: Record<string, string> = {
-    '': 'maj', m: 'm', '7': '7', maj7: 'maj7', m7: 'm7',
-    dim: 'dim', aug: 'aug', sus2: 'sus2', sus4: 'sus4',
-  };
+  const {
+    chord, tonality, mode,
+    chordHistory, calibrationBuffer,
+    isRecording, error,
+    start, stop, hasSignal, rmsDb,
+    resetHistory, editChord, recomputeTonalityForChords,
+  } = useChordDetection({
+    lockedTonality: isTonalityLocked ? lockedTonality : null,
+  });
 
-  const openEdit = (i: number) => {
+  // ── Motor de Inferencia Armónica ───────────────────────────────────────────
+  // Sólo activo en RECORDING con tonalidad bloqueada.
+  const historyNames     = useMemo(() => chordHistory.map(e => e.chord), [chordHistory]);
+  const currentChordName = chord?.chord ?? null;
+  const engineTonality   = isTonalityLocked ? lockedTonality : null;
+  const harmonicEngine   = useHarmonicEngine(engineTonality, historyNames, currentChordName);
+
+  const [phase, setPhase] = useState<SessionPhase>('IDLE');
+
+  // Acordes capturados durante calibración — se editan en el modal de confirmación
+  const [confirmedChords, setConfirmedChords] = useState<string[]>([]);
+
+  // Tonalidad local del modal — se recalcula cuando el usuario edita un acorde
+  const [localTonality, setLocalTonality] = useState<TonalityResult | null>(null);
+
+  // ── Transición CALIBRATING → CONFIRMING ────────────────────────────────────
+  useEffect(() => {
+    if (phase === 'CALIBRATING' && calibrationBuffer.length >= CALIBRATION_SIZE) {
+      setConfirmedChords([...calibrationBuffer]);
+      setLocalTonality(tonality);        // snapshot inicial del modal
+      setPhase('CONFIRMING');
+    }
+  }, [calibrationBuffer, phase]);
+
+  // ── Recalcular tonalidad local cuando el usuario edita acordes en CONFIRMING ─
+  useEffect(() => {
+    if (phase !== 'CONFIRMING' || confirmedChords.length === 0) return;
+    const recomputed = recomputeTonalityForChords(confirmedChords);
+    setLocalTonality(recomputed);
+  }, [confirmedChords, phase]);
+
+  // ── Modal de edición de acorde (usado en RECORDING y en CONFIRMING) ────────
+  const [editingIndex,    setEditingIndex]    = useState<number | null>(null);
+  const [editingContext,  setEditingContext]  = useState<'recording' | 'confirming'>('recording');
+  const [editRoot,        setEditRoot]        = useState('C');
+  const [editQuality,     setEditQuality]     = useState('');
+
+  const openEditRecording = (i: number) => {
     const entry = chordHistory[i];
     if (!entry) return;
     const m = entry.chord.match(/^([A-G][#b]?)(.*)$/);
     setEditRoot(m ? m[1] : 'C');
     setEditQuality(m ? m[2] : '');
+    setEditingContext('recording');
+    setEditingIndex(i);
+  };
+
+  const openEditConfirming = (i: number) => {
+    const chord = confirmedChords[i];
+    if (chord == null) return;
+    const m = chord.match(/^([A-G][#b]?)(.*)$/);
+    setEditRoot(m ? m[1] : 'C');
+    setEditQuality(m ? m[2] : '');
+    setEditingContext('confirming');
     setEditingIndex(i);
   };
 
   const confirmEdit = () => {
     if (editingIndex === null) return;
-    editChord(editingIndex, `${editRoot}${editQuality}`);
+    const newChord = `${editRoot}${editQuality}`;
+    if (editingContext === 'recording') {
+      editChord(editingIndex, newChord);
+    } else {
+      setConfirmedChords(prev =>
+        prev.map((c, i) => i === editingIndex ? newChord : c),
+      );
+    }
     setEditingIndex(null);
   };
 
-  // Circle state
-  const [manualMode, setManualMode]               = useState(false);
-  const [customProgression, setCustomProgression] = useState<string[]>([]);
-  const [selectedSegment, setSelectedSegment]     = useState<{ root: string; mode: 'major' | 'minor' } | null>(null);
-
-  const keyInfo: KeyInfo | null = useMemo(
-    () => (selectedSegment ? getKeyInfo(selectedSegment.root, selectedSegment.mode) : null),
-    [selectedSegment],
-  );
-
-  // Recording pulse
+  // ── Pulso del indicador de grabación ──────────────────────────────────────
   const pulseAnim = useRef(new Animated.Value(1)).current;
   useEffect(() => {
     if (!isRecording) { pulseAnim.setValue(1); return; }
     const loop = Animated.loop(
       Animated.sequence([
-        Animated.timing(pulseAnim, { toValue: 0.3, duration: 700, useNativeDriver: true }),
-        Animated.timing(pulseAnim, { toValue: 1,   duration: 700, useNativeDriver: true }),
+        Animated.timing(pulseAnim, { toValue: 0.2, duration: 900, useNativeDriver: true }),
+        Animated.timing(pulseAnim, { toValue: 1,   duration: 900, useNativeDriver: true }),
       ]),
     );
     loop.start();
     return () => loop.stop();
   }, [isRecording, pulseAnim]);
 
-  const handleManualAdd = (label: string) => {
-    if (customProgression.length < 8) setCustomProgression(prev => [...prev, label]);
+  // ── Fade-in del texto de calibración ──────────────────────────────────────
+  const calFade = useRef(new Animated.Value(0)).current;
+  useEffect(() => {
+    if (phase === 'CALIBRATING') {
+      Animated.timing(calFade, { toValue: 1, duration: 400, useNativeDriver: true }).start();
+    } else {
+      calFade.setValue(0);
+    }
+  }, [phase, calFade]);
+
+  // ── Handlers ──────────────────────────────────────────────────────────────
+  const handleStart = () => {
+    resetHistory();
+    setConfirmedChords([]);
+    setIsTonalityLocked(false);
+    setLockedTonality(null);
+    setPhase('CALIBRATING');
+    start();
   };
 
+  const handleStop = () => {
+    stop();
+    setPhase('IDLE');
+    setConfirmedChords([]);
+    setIsTonalityLocked(false);
+    setLockedTonality(null);
+    setSessionId(null);
+    setBlockId(null);
+    setSubmitError(null);
+  };
+
+  const handleRepeatCalibration = () => {
+    resetHistory();
+    setConfirmedChords([]);
+    setLocalTonality(null);
+    setIsTonalityLocked(false);
+    setLockedTonality(null);
+    setSubmitError(null);
+    setPhase('CALIBRATING');
+    // audio ya está activo — solo limpiamos el buffer
+  };
+
+  const handleConfirmTonality = async () => {
+    setIsSubmitting(true);
+    setSubmitError(null);
+
+    try {
+      // 1 — Create session using the locally computed (possibly edited) tonality
+      const tonalityLabel = localTonality
+        ? `${localTonality.key} ${localTonality.mode === 'major' ? 'mayor' : 'menor'}`
+        : undefined;
+
+      const session = await createSession({ title: tonalityLabel });
+      setSessionId(session.id);
+
+      // 2 — Patch session with detected tonality string (e.g. "Am")
+      if (localTonality) {
+        await updateSession(session.id, {
+          detectedTonality: `${localTonality.key}${localTonality.mode === 'major' ? '' : 'm'}`,
+        });
+      }
+
+      // 3 — Create the first block ("Calibración")
+      const block = await createBlock(session.id, {
+        label: 'Calibración',
+        keyCenter: localTonality
+          ? `${localTonality.key}${localTonality.mode === 'major' ? '' : 'm'}`
+          : undefined,
+      });
+      setBlockId(block.id);
+
+      // 4 — Send the 4 calibration chords as a batch
+      const chordPayloads = confirmedChords.map(name => ({
+        chordName: name,
+        ...parseChordName(name),
+        detectedAt: new Date().toISOString(),
+      }));
+      await createChords(block.id, chordPayloads);
+
+      // 5 — Lock the locally computed tonality and transition to RECORDING
+      if (localTonality) {
+        setLockedTonality(localTonality);
+        setIsTonalityLocked(true);
+      }
+      setPhase('RECORDING');
+    } catch (err) {
+      setSubmitError(extractErrorMessage(err, 'Error al conectar con el servidor'));
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // ── Render ────────────────────────────────────────────────────────────────
   return (
-    <View style={styles.container}>
+    <View style={s.root}>
       <StatusBar style="light" />
 
-      {/* Header */}
-      <View style={styles.header}>
-        <Text style={styles.appName}>LUMINA</Text>
-        <Animated.View style={[styles.dot, { opacity: pulseAnim }, !isRecording && styles.dotOff]} />
-      </View>
+      {/* ── Cabecera ── */}
+      <View style={s.header}>
+        <Text style={s.appName}>LUMINA</Text>
+        <Animated.View style={[s.dot, { opacity: pulseAnim }, !isRecording && s.dotOff]} />
 
-      {/* Sub-tab toggle */}
-      <View style={styles.tabRow}>
-        {(['detector', 'circulo', 'lienzo'] as const).map(tab => (
+        {/* Candado de tonalidad — solo visible en RECORDING */}
+        {phase === 'RECORDING' && lockedTonality && (
           <TouchableOpacity
-            key={tab}
-            style={[styles.tab, activeView === tab && styles.tabActive]}
-            onPress={() => setActiveView(tab)}
-            activeOpacity={0.7}
+            style={[s.lockBtn, isTonalityLocked && s.lockBtnActive]}
+            onPress={() => setIsTonalityLocked(prev => !prev)}
+            activeOpacity={0.75}
           >
-            <Text style={[styles.tabText, activeView === tab && styles.tabTextActive]}>
-              {tab === 'detector' ? 'Detector' : tab === 'circulo' ? 'Círculo' : 'Lienzo'}
+            <Text style={[s.lockIcon, isTonalityLocked && s.lockIconActive]}>
+              {isTonalityLocked ? '🔒' : '🔓'}
+            </Text>
+            <Text style={[s.lockLabel, isTonalityLocked && s.lockLabelActive]}>
+              {isTonalityLocked
+                ? `${lockedTonality.key} ${lockedTonality.mode === 'major' ? 'M' : 'm'}`
+                : 'Libre'}
             </Text>
           </TouchableOpacity>
-        ))}
+        )}
       </View>
 
-      {/* ── Detector ───────────────────────────────────────────── */}
-      {activeView === 'detector' ? (
+      {/* ══════════════════════════════════════════════════════════
+          IDLE — pantalla de espera
+      ══════════════════════════════════════════════════════════ */}
+      {phase === 'IDLE' && (
+        <View style={s.idleArea}>
+          <Text style={s.idleTitle}>El Estudio</Text>
+          <Text style={s.idleSubtitle}>
+            Inicia una sesión para detectar{'\n'}acordes en tiempo real
+          </Text>
+        </View>
+      )}
+
+      {/* ══════════════════════════════════════════════════════════
+          CALIBRATING — escucha activa con contador
+      ══════════════════════════════════════════════════════════ */}
+      {(phase === 'CALIBRATING' || phase === 'CONFIRMING') && (
+        <View style={s.chordArea}>
+          <ChordDisplay chord={chord} isActive={isRecording} hasSignal={hasSignal} rmsDb={rmsDb} />
+        </View>
+      )}
+
+      {phase === 'CALIBRATING' && (
+        <Animated.View style={[s.calBlock, { opacity: calFade }]}>
+          <Text style={s.calLabel}>Escuchando acordes…</Text>
+          {/* Contador numérico */}
+          <Text style={s.calCounter}>
+            {calibrationBuffer.length}
+            <Text style={s.calCounterDim}>/{CALIBRATION_SIZE}</Text>
+          </Text>
+          {/* Dots de progreso */}
+          <View style={s.calDots}>
+            {Array.from({ length: CALIBRATION_SIZE }).map((_, i) => (
+              <View
+                key={i}
+                style={[s.calDot, i < calibrationBuffer.length && s.calDotActive]}
+              />
+            ))}
+          </View>
+          {/* Acordes capturados hasta ahora */}
+          {calibrationBuffer.length > 0 && (
+            <View style={s.calChords}>
+              {calibrationBuffer.map((ch, i) => (
+                <View key={i} style={s.calChordPill}>
+                  <Text style={s.calChordText}>{ch}</Text>
+                </View>
+              ))}
+            </View>
+          )}
+        </Animated.View>
+      )}
+
+      {/* ══════════════════════════════════════════════════════════
+          RECORDING — sesión activa
+      ══════════════════════════════════════════════════════════ */}
+      {phase === 'RECORDING' && (
         <>
-          <View style={styles.chordArea}>
+          <View style={s.chordArea}>
             <ChordDisplay chord={chord} isActive={isRecording} hasSignal={hasSignal} rmsDb={rmsDb} />
           </View>
 
           <ScrollView
             horizontal
             showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.historyScroll}
-            style={styles.historyScrollContainer}
+            contentContainerStyle={s.historyScroll}
+            style={s.historyScrollWrap}
           >
             {chordHistory.map((entry, i) => {
               const isNewest = i === chordHistory.length - 1;
               return (
-                <View key={i} style={styles.historyItem}>
-                  {i > 0 && <Text style={styles.historySep}>›</Text>}
+                <View key={i} style={s.historyItem}>
+                  {i > 0 && <Text style={s.historySep}>›</Text>}
                   <TouchableOpacity
-                    style={[styles.historyPill, isNewest && styles.historyPillActive, entry.edited && styles.historyPillEdited]}
-                    onPress={() => openEdit(i)}
+                    style={[
+                      s.historyPill,
+                      isNewest && s.historyPillActive,
+                      entry.edited && s.historyPillEdited,
+                    ]}
+                    onPress={() => openEditRecording(i)}
                     activeOpacity={0.7}
                   >
-                    <Text style={[styles.historyChord, isNewest && styles.historyChordActive]}>{entry.chord}</Text>
-                    {entry.edited && <Text style={styles.historyEditDot}>✎</Text>}
+                    <Text style={[s.historyChord, isNewest && s.historyChordActive]}>
+                      {entry.chord}
+                    </Text>
+                    {entry.edited && <Text style={s.historyEditDot}>✎</Text>}
                   </TouchableOpacity>
                 </View>
               );
             })}
           </ScrollView>
 
-          <View style={styles.infoBlock}>
-            <InfoRow label="Tonalidad" value={tonality ? `${tonality.key} ${tonality.mode === 'major' ? 'mayor' : 'menor'}` : null} />
-            <InfoRow label="Relativa"  value={tonality ? getRelative(tonality.key, tonality.mode) : null} />
-            <InfoRow label="Modo"      value={mode ? (MODE_LABELS[mode.mode] ?? mode.mode) : null} />
+          <View style={s.infoBlock}>
+            <InfoRow
+              label="Tonalidad"
+              value={
+                (() => {
+                  const t = isTonalityLocked ? lockedTonality : tonality;
+                  return t ? `${t.key} ${t.mode === 'major' ? 'mayor' : 'menor'}` : null;
+                })()
+              }
+              locked={isTonalityLocked}
+            />
+            <InfoRow
+              label="Modo"
+              value={mode ? (MODE_LABELS[mode.mode] ?? mode.mode) : null}
+            />
           </View>
-        </>
 
-      ) : activeView === 'lienzo' ? (
-        /* ── Lienzo ──────────────────────────────────────────────── */
-        <CanvasBoard chordHistory={chordHistory} tonality={tonality} />
-
-      ) : (
-        /* ── Círculo ─────────────────────────────────────────────── */
-        <View style={styles.circleArea}>
-          <View style={styles.modeRow}>
-            {([false, true] as const).map(isManual => (
+          {/* ── Panel de Sugerencias Armónicas ── */}
+          {harmonicEngine.hasSuggestions && (
+            <View style={s.suggestionsWrap}>
               <TouchableOpacity
-                key={String(isManual)}
-                style={[styles.modeBtn, manualMode === isManual && styles.modeBtnActive]}
-                onPress={() => setManualMode(isManual)}
-                activeOpacity={0.7}
+                style={s.suggestionsToggle}
+                onPress={() => setShowSuggestions(p => !p)}
+                activeOpacity={0.75}
               >
-                <Text style={[styles.modeBtnText, manualMode === isManual && styles.modeBtnTextActive]}>
-                  {isManual ? 'Manual' : 'Tiempo real'}
+                <Text style={s.suggestionsToggleText}>
+                  {showSuggestions ? '▾ Ruedas de Apoyo' : '▸ Ruedas de Apoyo'}
                 </Text>
               </TouchableOpacity>
-            ))}
-          </View>
 
-          <CircleOfFifths
-            tonality={manualMode ? null : tonality}
-            chord={manualMode ? null : chord}
-            chordHistory={manualMode ? [] : chordHistory.map(e => e.chord)}
-            onSegmentPress={(root, m) => setSelectedSegment({ root, mode: m })}
-            manualMode={manualMode}
-            customProgression={customProgression}
-            onManualAdd={handleManualAdd}
-          />
-
-          {manualMode && (
-            customProgression.length === 0 ? (
-              <Text style={styles.progressionEmpty}>Toca los segmentos para añadir acordes</Text>
-            ) : (
-              <View style={styles.progressionContainer}>
-                <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.progressionScroll}>
-                  {customProgression.map((label, i) => (
-                    <View key={i} style={styles.progressionPill}>
-                      <Text style={styles.progressionPillText}>{label}</Text>
-                      <TouchableOpacity onPress={() => setCustomProgression(prev => prev.filter((_, j) => j !== i))} hitSlop={{ top: 8, bottom: 8, left: 4, right: 8 }}>
-                        <Text style={styles.progressionPillX}>✕</Text>
-                      </TouchableOpacity>
-                    </View>
-                  ))}
-                </ScrollView>
-                <TouchableOpacity onPress={() => setCustomProgression([])} style={styles.clearBtn}>
-                  <Text style={styles.clearBtnText}>Limpiar</Text>
-                </TouchableOpacity>
-              </View>
-            )
+              {showSuggestions && (
+                <View style={s.suggestionsPanel}>
+                  <SuggestionRow label="Acordes de la tonalidad" items={harmonicEngine.diatonicScale} maxItems={7} />
+                  <View style={s.sugDivider} />
+                  <SuggestionRow label="Siguiente diatónico" items={harmonicEngine.diatonic} />
+                  <SuggestionRow label="Intercambio modal"   items={harmonicEngine.modal}    />
+                  <SuggestionRow label="Dominante secundario" items={harmonicEngine.secondary} />
+                  {harmonicEngine.deceptive.length > 0 && (
+                    <SuggestionRow label="Cadencia deceptiva" items={harmonicEngine.deceptive} />
+                  )}
+                  {harmonicEngine.texture.length > 0 && (
+                    <SuggestionRow label="Textura"           items={harmonicEngine.texture}   />
+                  )}
+                </View>
+              )}
+            </View>
           )}
-        </View>
+        </>
       )}
 
-      {error && <Text style={styles.errorText}>{error}</Text>}
+      {error ? <Text style={s.errorText}>{error}</Text> : null}
 
-      {!(activeView === 'circulo' && manualMode) && (
-        <View style={styles.buttonRow}>
-          {isRecording && (
-            <TouchableOpacity style={styles.buttonReset} onPress={resetHistory} activeOpacity={0.75}>
-              <Text style={styles.buttonResetText}>Reiniciar</Text>
+      {/* ── Controles principales ── */}
+      <View style={s.controls}>
+        {phase === 'IDLE' && (
+          <TouchableOpacity style={s.btnPrimary} onPress={handleStart} activeOpacity={0.85}>
+            <Text style={s.btnPrimaryText}>Iniciar</Text>
+          </TouchableOpacity>
+        )}
+        {phase === 'CALIBRATING' && (
+          <TouchableOpacity style={[s.btnPrimary, s.btnStop]} onPress={handleStop} activeOpacity={0.85}>
+            <Text style={s.btnPrimaryText}>Cancelar</Text>
+          </TouchableOpacity>
+        )}
+        {phase === 'RECORDING' && (
+          <>
+            <TouchableOpacity style={s.btnSecondary} onPress={() => resetHistory()} activeOpacity={0.75}>
+              <Text style={s.btnSecondaryText}>Reiniciar</Text>
             </TouchableOpacity>
-          )}
-          <TouchableOpacity
-            style={[styles.button, isRecording && styles.buttonStop]}
-            onPress={isRecording ? stop : start}
-            activeOpacity={0.75}
-          >
-            <Text style={styles.buttonText}>{isRecording ? 'Detener' : 'Iniciar'}</Text>
-          </TouchableOpacity>
+            <TouchableOpacity style={[s.btnPrimary, s.btnStop]} onPress={handleStop} activeOpacity={0.85}>
+              <Text style={s.btnPrimaryText}>Detener</Text>
+            </TouchableOpacity>
+          </>
+        )}
+      </View>
+
+      {/* ══════════════════════════════════════════════════════════
+          MODAL DE CONFIRMACIÓN TONAL (fase CONFIRMING)
+      ══════════════════════════════════════════════════════════ */}
+      <Modal
+        visible={phase === 'CONFIRMING'}
+        transparent
+        animationType="slide"
+        onRequestClose={handleRepeatCalibration}
+      >
+        <View style={s.confirmBackdrop}>
+          <View style={s.confirmPanel}>
+            <View style={s.confirmHandle} />
+
+            <Text style={s.confirmTitle}>Tonalidad detectada</Text>
+
+            {/* Tonalidad inferida — se recalcula si el usuario edita acordes */}
+            <View style={s.tonalityCard}>
+              <Text style={s.tonalityKey}>
+                {localTonality
+                  ? `${localTonality.key} ${localTonality.mode === 'major' ? 'mayor' : 'menor'}`
+                  : '—'}
+              </Text>
+              {localTonality && mode && (
+                <Text style={s.tonalityMode}>
+                  {MODE_LABELS[mode.mode] ?? mode.mode}
+                </Text>
+              )}
+            </View>
+
+            {/* Acordes capturados — editables */}
+            <Text style={s.confirmSectionLabel}>Acordes capturados</Text>
+            <Text style={s.confirmSectionHint}>
+              Toca un acorde para corregirlo si el detector falló
+            </Text>
+            <View style={s.confirmChords}>
+              {confirmedChords.map((ch, i) => (
+                <TouchableOpacity
+                  key={i}
+                  style={s.confirmChordChip}
+                  onPress={() => openEditConfirming(i)}
+                  activeOpacity={0.75}
+                >
+                  <Text style={s.confirmChordText}>{ch}</Text>
+                  <Text style={s.confirmChordEdit}>✎</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {/* Error de conexión */}
+            {submitError ? (
+              <View style={s.submitErrorBox}>
+                <Text style={s.submitErrorText}>{submitError}</Text>
+              </View>
+            ) : null}
+
+            {/* Acciones */}
+            <View style={s.confirmActions}>
+              <TouchableOpacity
+                style={[s.confirmRepeat, isSubmitting && s.confirmBtnDisabled]}
+                onPress={handleRepeatCalibration}
+                activeOpacity={0.8}
+                disabled={isSubmitting}
+              >
+                <Text style={s.confirmRepeatText}>Repetir</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[s.confirmOk, isSubmitting && s.confirmBtnDisabled]}
+                onPress={handleConfirmTonality}
+                activeOpacity={0.85}
+                disabled={isSubmitting}
+              >
+                <Text style={s.confirmOkText}>
+                  {isSubmitting ? 'Conectando…' : 'Confirmar y grabar'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
         </View>
-      )}
-
-      {/* Chord info modal */}
-      <Modal visible={selectedSegment !== null} transparent animationType="slide" onRequestClose={() => setSelectedSegment(null)}>
-        <TouchableOpacity style={styles.modalBackdrop} activeOpacity={1} onPress={() => setSelectedSegment(null)}>
-          <TouchableOpacity activeOpacity={1} style={styles.modalPanel}>
-            {keyInfo && <KeyInfoPanel info={keyInfo} />}
-          </TouchableOpacity>
-        </TouchableOpacity>
       </Modal>
 
-      {/* Edit chord modal */}
-      <Modal visible={editingIndex !== null} transparent animationType="slide" onRequestClose={() => setEditingIndex(null)}>
-        <TouchableOpacity style={styles.editModalBackdrop} activeOpacity={1} onPress={() => setEditingIndex(null)}>
-          <TouchableOpacity activeOpacity={1} style={styles.editModalPanel}>
-            <View style={styles.editModalHandle} />
-            <Text style={styles.editModalTitle}>Editar acorde</Text>
+      {/* ── Modal: editor de acorde (nota + calidad) ── */}
+      <Modal
+        visible={editingIndex !== null}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setEditingIndex(null)}
+      >
+        <TouchableOpacity
+          style={s.editorBackdrop}
+          activeOpacity={1}
+          onPress={() => setEditingIndex(null)}
+        >
+          <TouchableOpacity activeOpacity={1} style={s.editorPanel}>
+            <View style={s.editorHandle} />
+            <Text style={s.editorTitle}>Editar acorde</Text>
 
-            <Text style={styles.editSectionLabel}>Nota raíz</Text>
-            <View style={styles.editNoteGrid}>
+            <Text style={s.editorLabel}>Nota raíz</Text>
+            <View style={s.editorGrid}>
               {EDIT_NOTES.map(note => (
-                <TouchableOpacity key={note} style={[styles.editNoteBtn, editRoot === note && styles.editNoteBtnActive]} onPress={() => setEditRoot(note)}>
-                  <Text style={[styles.editNoteText, editRoot === note && styles.editNoteTextActive]}>{note}</Text>
+                <TouchableOpacity
+                  key={note}
+                  style={[s.editorChip, editRoot === note && s.editorChipActive]}
+                  onPress={() => setEditRoot(note)}
+                >
+                  <Text style={[s.editorChipText, editRoot === note && s.editorChipTextActive]}>
+                    {note}
+                  </Text>
                 </TouchableOpacity>
               ))}
             </View>
 
-            <Text style={styles.editSectionLabel}>Calidad</Text>
-            <View style={styles.editQualityGrid}>
+            <Text style={s.editorLabel}>Calidad</Text>
+            <View style={s.editorGrid}>
               {EDIT_QUALITIES.map(q => (
-                <TouchableOpacity key={q || '__maj'} style={[styles.editQualityBtn, editQuality === q && styles.editQualityBtnActive]} onPress={() => setEditQuality(q)}>
-                  <Text style={[styles.editQualityText, editQuality === q && styles.editQualityTextActive]}>{QUALITY_LABELS[q]}</Text>
+                <TouchableOpacity
+                  key={q || '__maj'}
+                  style={[s.editorChip, editQuality === q && s.editorChipActive]}
+                  onPress={() => setEditQuality(q)}
+                >
+                  <Text style={[s.editorChipText, editQuality === q && s.editorChipTextActive]}>
+                    {QUALITY_LABELS[q]}
+                  </Text>
                 </TouchableOpacity>
               ))}
             </View>
 
-            <View style={styles.editConfirmRow}>
-              <TouchableOpacity style={styles.editCancelBtn} onPress={() => setEditingIndex(null)}>
-                <Text style={styles.editCancelText}>Cancelar</Text>
+            <View style={s.editorActions}>
+              <TouchableOpacity style={s.editorCancel} onPress={() => setEditingIndex(null)}>
+                <Text style={s.editorCancelText}>Cancelar</Text>
               </TouchableOpacity>
-              <TouchableOpacity style={styles.editConfirmBtn} onPress={confirmEdit}>
-                <Text style={styles.editConfirmText}>Guardar — {editRoot}{editQuality}</Text>
+              <TouchableOpacity style={s.editorConfirm} onPress={confirmEdit}>
+                <Text style={s.editorConfirmText}>Guardar — {editRoot}{editQuality || ' maj'}</Text>
               </TouchableOpacity>
             </View>
           </TouchableOpacity>
@@ -308,139 +594,249 @@ export default function EstudioScreen() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Sub-components
-// ---------------------------------------------------------------------------
+// ─── Sub-componentes ──────────────────────────────────────────────────────────
 
-function InfoRow({ label, value }: { label: string; value: string | null }) {
+function InfoRow({ label, value, locked }: { label: string; value: string | null; locked?: boolean }) {
   return (
-    <View style={styles.infoRow}>
-      <Text style={styles.infoLabel}>{label}</Text>
-      <Text style={[styles.infoValue, !value && styles.infoEmpty]}>{value ?? '—'}</Text>
+    <View style={s.infoRow}>
+      <Text style={s.infoLabel}>{label}</Text>
+      <Text style={[s.infoValue, !value && s.infoEmpty, locked && s.infoValueLocked]}>
+        {value ?? '—'}{locked ? '  🔒' : ''}
+      </Text>
     </View>
   );
 }
 
-function KeyInfoPanel({ info }: { info: KeyInfo }) {
+// ─── SuggestionRow ────────────────────────────────────────────────────────────
+
+const FUNCTION_COLOR: Record<string, string> = {
+  tonic:       '#3a6aed',
+  subdominant: '#2a8a5a',
+  dominant:    '#9a3aed',
+  leading:     '#c07030',
+};
+
+function SuggestionRow({ label, items, maxItems = 4 }: { label: string; items: ChordSuggestion[]; maxItems?: number }) {
+  if (items.length === 0) return null;
   return (
-    <View style={styles.panelContent}>
-      <View style={styles.panelHandle} />
-      <Text style={styles.panelTitle}>{info.displayName}</Text>
-      <Text style={styles.panelSectionLabel}>Escala</Text>
-      <View style={styles.pillRow}>
-        {info.scale.map(note => (
-          <View key={note} style={styles.notePill}><Text style={styles.notePillText}>{note}</Text></View>
-        ))}
-      </View>
-      <Text style={styles.panelSectionLabel}>Acordes diatónicos</Text>
-      <View style={styles.pillRow}>
-        {info.chords.map(c => (
-          <View key={c} style={styles.chordPill}><Text style={styles.chordPillText}>{c}</Text></View>
+    <View style={s.sugRow}>
+      <Text style={s.sugRowLabel}>{label}</Text>
+      <View style={s.sugChips}>
+        {items.slice(0, maxItems).map((item, i) => (
+          <View key={i} style={[s.sugChip, { borderColor: FUNCTION_COLOR[item.function] ?? '#1e1e2e' }]}>
+            <Text style={s.sugChipChord}>{item.chord}</Text>
+            <Text style={[s.sugChipDegree, { color: FUNCTION_COLOR[item.function] ?? '#404060' }]}>
+              {item.degree}
+            </Text>
+          </View>
         ))}
       </View>
     </View>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Styles
-// ---------------------------------------------------------------------------
+// ─── Estilos ──────────────────────────────────────────────────────────────────
 
-const styles = StyleSheet.create({
-  container: {
+const s = StyleSheet.create({
+  root: {
     flex: 1,
     backgroundColor: '#0a0a0f',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingTop: 56,
-    paddingBottom: 16,
-    paddingHorizontal: 32,
+    paddingBottom: 20,
+    paddingHorizontal: 28,
   },
-  header: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  appName: { fontSize: 12, letterSpacing: 8, color: '#3a3a4a', fontWeight: '600' },
-  dot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#7c3aed' },
-  dotOff: { backgroundColor: '#2a2a3a' },
 
-  tabRow: { flexDirection: 'row', backgroundColor: '#0e0e18', borderRadius: 20, padding: 3, gap: 2 },
-  tab: { paddingHorizontal: 20, paddingVertical: 7, borderRadius: 17 },
-  tabActive: { backgroundColor: '#7c3aed' },
-  tabText: { fontSize: 11, color: '#3a3a5a', fontWeight: '600', letterSpacing: 1, textTransform: 'uppercase' },
-  tabTextActive: { color: '#ffffff' },
+  // Cabecera
+  header:  { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  appName: { fontSize: 12, letterSpacing: 8, color: '#1e1e2e', fontWeight: '600' },
+  dot:     { width: 6, height: 6, borderRadius: 3, backgroundColor: '#7c3aed' },
+  dotOff:  { backgroundColor: '#1a1a28' },
 
-  chordArea: { flex: 1, justifyContent: 'center' },
+  // Candado de tonalidad
+  lockBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12,
+    borderWidth: 1, borderColor: '#1e1e2e', backgroundColor: 'transparent',
+    marginLeft: 8,
+  },
+  lockBtnActive: { borderColor: '#7c3aed', backgroundColor: '#12103a' },
+  lockIcon:      { fontSize: 11 },
+  lockIconActive: {},
+  lockLabel:     { color: '#252535', fontSize: 10, fontWeight: '600', letterSpacing: 0.5 },
+  lockLabelActive: { color: '#a080e0' },
 
-  infoBlock: { width: '100%', gap: 8, marginBottom: 24 },
-  infoRow: { flexDirection: 'row', justifyContent: 'center', gap: 16 },
-  infoLabel: { fontSize: 12, color: '#333', width: 76, textAlign: 'right', letterSpacing: 0.5 },
-  infoValue: { fontSize: 12, color: '#888', width: 140, letterSpacing: 0.5 },
-  infoEmpty: { color: '#2a2a3a' },
+  // IDLE
+  idleArea:     { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 10 },
+  idleTitle:    { color: '#c0b0f0', fontSize: 26, fontWeight: '700', letterSpacing: -0.3 },
+  idleSubtitle: { color: '#2a2a4a', fontSize: 13, textAlign: 'center', lineHeight: 20 },
 
-  circleArea: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 16 },
-  modeRow: { flexDirection: 'row', backgroundColor: '#0e0e18', borderRadius: 16, padding: 3, gap: 2 },
-  modeBtn: { paddingHorizontal: 16, paddingVertical: 6, borderRadius: 13 },
-  modeBtnActive: { backgroundColor: '#1e1e2e' },
-  modeBtnText: { fontSize: 11, color: '#3a3a5a', fontWeight: '500', letterSpacing: 0.5 },
-  modeBtnTextActive: { color: '#c0c0d0' },
+  // Chord display
+  chordArea: { flex: 1, justifyContent: 'center', width: '100%' },
 
-  progressionEmpty: { color: '#2a2a3a', fontSize: 12, textAlign: 'center', letterSpacing: 0.5 },
-  progressionContainer: { width: '100%', gap: 10, alignItems: 'center' },
-  progressionScroll: { paddingHorizontal: 4, gap: 8, flexDirection: 'row' },
-  progressionPill: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 14, backgroundColor: '#12121c', borderWidth: 1, borderColor: '#2a2a3a' },
-  progressionPillText: { color: '#c0c0d0', fontSize: 13, fontWeight: '500' },
-  progressionPillX: { color: '#3a3a5a', fontSize: 11 },
-  clearBtn: { paddingHorizontal: 16, paddingVertical: 6, borderRadius: 12, borderWidth: 1, borderColor: '#2a2a3a' },
-  clearBtnText: { color: '#3a3a5a', fontSize: 11, letterSpacing: 1, textTransform: 'uppercase' },
+  // Calibración
+  calBlock: {
+    alignItems: 'center',
+    gap: 12,
+    marginBottom: 8,
+    width: '100%',
+  },
+  calLabel:       { color: '#404060', fontSize: 12, letterSpacing: 1.5, textTransform: 'uppercase' },
+  calCounter:     { color: '#c0b0f0', fontSize: 52, fontWeight: '200', letterSpacing: -2 },
+  calCounterDim:  { color: '#2a2a4a', fontSize: 32, fontWeight: '200' },
+  calDots:        { flexDirection: 'row', gap: 10 },
+  calDot:         { width: 10, height: 10, borderRadius: 5, backgroundColor: '#1a1a28', borderWidth: 1, borderColor: '#2a2a3a' },
+  calDotActive:   { backgroundColor: '#7c3aed', borderColor: '#7c3aed' },
+  calChords:      { flexDirection: 'row', gap: 8, flexWrap: 'wrap', justifyContent: 'center' },
+  calChordPill:   { paddingHorizontal: 14, paddingVertical: 7, borderRadius: 14, backgroundColor: '#12103a', borderWidth: 1, borderColor: '#2a2060' },
+  calChordText:   { color: '#c0b0f0', fontSize: 14, fontWeight: '600' },
 
-  errorText: { color: '#f87171', fontSize: 12, marginBottom: 16, textAlign: 'center' },
+  // Historial (RECORDING)
+  historyScrollWrap: { width: '100%', marginBottom: 8 },
+  historyScroll:     { flexDirection: 'row', alignItems: 'center', paddingVertical: 4, paddingHorizontal: 2, gap: 4 },
+  historyItem:       { flexDirection: 'row', alignItems: 'center' },
+  historySep:        { color: '#1e1e2e', fontSize: 16, marginHorizontal: 2 },
+  historyPill:       { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12, backgroundColor: '#10101a', borderWidth: 1, borderColor: '#1a1a28', gap: 4 },
+  historyPillActive: { backgroundColor: '#16103a', borderColor: '#4c2a9a' },
+  historyPillEdited: { borderColor: '#7c3aed' },
+  historyChord:      { color: '#404060', fontSize: 13, fontWeight: '500' },
+  historyChordActive:{ color: '#c0b0f0', fontWeight: '700' },
+  historyEditDot:    { color: '#7c3aed', fontSize: 10 },
 
-  buttonRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
-  button: { paddingHorizontal: 48, paddingVertical: 15, borderRadius: 32, backgroundColor: '#7c3aed' },
-  buttonStop: { backgroundColor: '#7f1d1d' },
-  buttonText: { color: '#fff', fontSize: 14, fontWeight: '600', letterSpacing: 1.5, textTransform: 'uppercase' },
-  buttonReset: { paddingHorizontal: 28, paddingVertical: 15, borderRadius: 32, borderWidth: 1, borderColor: '#2a2a3a' },
-  buttonResetText: { color: '#3a3a5a', fontSize: 14, fontWeight: '600', letterSpacing: 1.5, textTransform: 'uppercase' },
+  // Info block
+  infoBlock:       { width: '100%', gap: 6, marginBottom: 20 },
+  infoRow:         { flexDirection: 'row', justifyContent: 'center', gap: 16 },
+  infoLabel:       { fontSize: 11, color: '#1e1e2e', width: 72, textAlign: 'right', letterSpacing: 0.5 },
+  infoValue:       { fontSize: 11, color: '#707090', width: 140, letterSpacing: 0.5 },
+  infoEmpty:       { color: '#1a1a28' },
+  infoValueLocked: { color: '#a080e0' },
 
-  modalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.65)', justifyContent: 'flex-end' },
-  modalPanel: { backgroundColor: '#0e0e18', borderTopLeftRadius: 20, borderTopRightRadius: 20, borderTopWidth: 1, borderTopColor: '#1e1e2e', paddingTop: 12, paddingBottom: 48, paddingHorizontal: 24 },
-  panelContent: { gap: 0 },
-  panelHandle: { width: 36, height: 4, borderRadius: 2, backgroundColor: '#2a2a3a', alignSelf: 'center', marginBottom: 20 },
-  panelTitle: { color: '#f0f0f5', fontSize: 20, fontWeight: '300', letterSpacing: 1, marginBottom: 4 },
-  panelSectionLabel: { color: '#3a3a5a', fontSize: 10, letterSpacing: 2, textTransform: 'uppercase', marginTop: 20, marginBottom: 10 },
-  pillRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
-  notePill: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 8, backgroundColor: '#1a1a28', borderWidth: 1, borderColor: '#2a2a3a' },
-  notePillText: { color: '#9090b0', fontSize: 13 },
-  chordPill: { paddingHorizontal: 12, paddingVertical: 5, borderRadius: 8, backgroundColor: '#12103a', borderWidth: 1, borderColor: '#2e2860' },
-  chordPillText: { color: '#c0b8f0', fontSize: 13 },
+  errorText: { color: '#f87171', fontSize: 12, marginBottom: 12, textAlign: 'center' },
 
-  historyScrollContainer: { width: '100%', marginBottom: 8 },
-  historyScroll: { flexDirection: 'row', alignItems: 'center', paddingVertical: 4, paddingHorizontal: 2, gap: 4 },
-  historyItem: { flexDirection: 'row', alignItems: 'center' },
-  historySep: { color: '#2a2a4a', fontSize: 16, marginHorizontal: 2 },
-  historyPill: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12, backgroundColor: '#12121e', borderWidth: 1, borderColor: '#1e1e30', gap: 4 },
-  historyPillActive: { backgroundColor: '#1a1040', borderColor: '#4c2a9a' },
-  historyPillEdited: { borderColor: '#7c3aed', borderStyle: 'dashed' },
-  historyChord: { color: '#505070', fontSize: 13, fontWeight: '500' },
-  historyChordActive: { color: '#c0b0f0', fontWeight: '700' },
-  historyEditDot: { color: '#7c3aed', fontSize: 10 },
+  // Controles
+  controls:         { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  btnPrimary:       { paddingHorizontal: 52, paddingVertical: 16, borderRadius: 32, backgroundColor: '#7c3aed' },
+  btnStop:          { backgroundColor: '#5a1a1a' },
+  btnPrimaryText:   { color: '#fff', fontSize: 14, fontWeight: '700', letterSpacing: 1.5, textTransform: 'uppercase' },
+  btnSecondary:     { paddingHorizontal: 24, paddingVertical: 16, borderRadius: 32, borderWidth: 1, borderColor: '#1e1e2e' },
+  btnSecondaryText: { color: '#2a2a3a', fontSize: 14, fontWeight: '600', letterSpacing: 1.5, textTransform: 'uppercase' },
 
-  editModalBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.75)', justifyContent: 'flex-end' },
-  editModalPanel: { backgroundColor: '#0e0e18', borderTopLeftRadius: 24, borderTopRightRadius: 24, borderTopWidth: 1, borderTopColor: '#1e1e2e', paddingTop: 12, paddingBottom: 48, paddingHorizontal: 20 },
-  editModalHandle: { width: 36, height: 4, borderRadius: 2, backgroundColor: '#2a2a3a', alignSelf: 'center', marginBottom: 16 },
-  editModalTitle: { color: '#9090b0', fontSize: 11, letterSpacing: 2, textTransform: 'uppercase', textAlign: 'center', marginBottom: 16 },
-  editSectionLabel: { color: '#3a3a5a', fontSize: 10, letterSpacing: 2, textTransform: 'uppercase', marginBottom: 8, marginTop: 12 },
-  editNoteGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
-  editNoteBtn: { width: 44, height: 38, borderRadius: 10, backgroundColor: '#1a1a28', borderWidth: 1, borderColor: '#2a2a3a', alignItems: 'center', justifyContent: 'center' },
-  editNoteBtnActive: { backgroundColor: '#2a1060', borderColor: '#7c3aed' },
-  editNoteText: { color: '#7070a0', fontSize: 13, fontWeight: '600' },
-  editNoteTextActive: { color: '#c0b0f0' },
-  editQualityGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
-  editQualityBtn: { paddingHorizontal: 12, paddingVertical: 7, borderRadius: 10, backgroundColor: '#1a1a28', borderWidth: 1, borderColor: '#2a2a3a' },
-  editQualityBtnActive: { backgroundColor: '#2a1060', borderColor: '#7c3aed' },
-  editQualityText: { color: '#7070a0', fontSize: 13 },
-  editQualityTextActive: { color: '#c0b0f0' },
-  editConfirmRow: { flexDirection: 'row', justifyContent: 'flex-end', gap: 10, marginTop: 20 },
-  editCancelBtn: { paddingHorizontal: 20, paddingVertical: 10, borderRadius: 16, borderWidth: 1, borderColor: '#2a2a3a' },
-  editCancelText: { color: '#505070', fontSize: 13 },
-  editConfirmBtn: { paddingHorizontal: 20, paddingVertical: 10, borderRadius: 16, backgroundColor: '#7c3aed' },
-  editConfirmText: { color: '#fff', fontSize: 13, fontWeight: '600' },
+  // ── Modal de confirmación tonal ────────────────────────────────────────────
+  confirmBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.82)',
+    justifyContent: 'flex-end',
+  },
+  confirmPanel: {
+    backgroundColor: '#0c0c18',
+    borderTopLeftRadius: 28,
+    borderTopRightRadius: 28,
+    borderTopWidth: 1,
+    borderTopColor: '#1e1e30',
+    paddingTop: 12,
+    paddingBottom: 48,
+    paddingHorizontal: 24,
+    gap: 0,
+  },
+  confirmHandle: {
+    width: 36, height: 4, borderRadius: 2,
+    backgroundColor: '#1e1e2e', alignSelf: 'center', marginBottom: 24,
+  },
+  confirmTitle: {
+    color: '#505070', fontSize: 10, letterSpacing: 3,
+    textTransform: 'uppercase', textAlign: 'center', marginBottom: 20,
+  },
+  tonalityCard: {
+    backgroundColor: '#12103a', borderRadius: 20,
+    borderWidth: 1, borderColor: '#2a2060',
+    paddingVertical: 20, alignItems: 'center', gap: 4, marginBottom: 24,
+  },
+  tonalityKey:  { color: '#c0b0f0', fontSize: 32, fontWeight: '300', letterSpacing: -0.5 },
+  tonalityMode: { color: '#4a3a7a', fontSize: 12, letterSpacing: 1.5, textTransform: 'uppercase' },
+
+  confirmSectionLabel: {
+    color: '#2a2a4a', fontSize: 10, letterSpacing: 2,
+    textTransform: 'uppercase', marginBottom: 4,
+  },
+  confirmSectionHint: {
+    color: '#1e1e2e', fontSize: 11, marginBottom: 12,
+  },
+  confirmChords: { flexDirection: 'row', gap: 8, flexWrap: 'wrap', marginBottom: 28 },
+  confirmChordChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingHorizontal: 16, paddingVertical: 10,
+    borderRadius: 16, backgroundColor: '#14121e',
+    borderWidth: 1, borderColor: '#2a2a3a',
+  },
+  confirmChordText: { color: '#c0b0f0', fontSize: 16, fontWeight: '600' },
+  confirmChordEdit: { color: '#3a2a6a', fontSize: 11 },
+
+  confirmActions: { flexDirection: 'row', gap: 10 },
+  confirmBtnDisabled: { opacity: 0.45 },
+  confirmRepeat: {
+    flex: 1, paddingVertical: 14, borderRadius: 18,
+    borderWidth: 1, borderColor: '#1e1e2e', alignItems: 'center',
+  },
+  confirmRepeatText: { color: '#404060', fontSize: 14, fontWeight: '600' },
+  confirmOk: {
+    flex: 2, paddingVertical: 14, borderRadius: 18,
+    backgroundColor: '#7c3aed', alignItems: 'center',
+  },
+  confirmOkText: { color: '#fff', fontSize: 14, fontWeight: '700', letterSpacing: 0.5 },
+
+  // Error de conexión
+  submitErrorBox: {
+    backgroundColor: '#1a0a0a', borderRadius: 12,
+    borderWidth: 1, borderColor: '#5a1a1a',
+    paddingVertical: 10, paddingHorizontal: 14, marginBottom: 10,
+  },
+  submitErrorText: { color: '#f87171', fontSize: 12, lineHeight: 18 },
+
+  // ── Modal editor de acorde ─────────────────────────────────────────────────
+  editorBackdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.82)', justifyContent: 'flex-end' },
+  editorPanel:    {
+    backgroundColor: '#0e0e18',
+    borderTopLeftRadius: 24, borderTopRightRadius: 24,
+    borderTopWidth: 1, borderTopColor: '#1a1a28',
+    paddingTop: 12, paddingBottom: 48, paddingHorizontal: 20,
+  },
+  editorHandle:   { width: 36, height: 4, borderRadius: 2, backgroundColor: '#1e1e2e', alignSelf: 'center', marginBottom: 16 },
+  editorTitle:    { color: '#505070', fontSize: 11, letterSpacing: 2, textTransform: 'uppercase', textAlign: 'center', marginBottom: 16 },
+  editorLabel:    { color: '#252535', fontSize: 10, letterSpacing: 2, textTransform: 'uppercase', marginBottom: 8, marginTop: 12 },
+  editorGrid:     { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  editorChip:         { paddingHorizontal: 12, paddingVertical: 8, borderRadius: 10, backgroundColor: '#12121e', borderWidth: 1, borderColor: '#1e1e2e', minWidth: 44, alignItems: 'center' },
+  editorChipActive:   { backgroundColor: '#20104a', borderColor: '#7c3aed' },
+  editorChipText:     { color: '#404060', fontSize: 13, fontWeight: '600' },
+  editorChipTextActive:{ color: '#c0b0f0' },
+  editorActions:  { flexDirection: 'row', justifyContent: 'flex-end', gap: 10, marginTop: 20 },
+  editorCancel:   { paddingHorizontal: 20, paddingVertical: 11, borderRadius: 16, borderWidth: 1, borderColor: '#1e1e2e' },
+  editorCancelText:{ color: '#303050', fontSize: 13 },
+  editorConfirm:  { paddingHorizontal: 20, paddingVertical: 11, borderRadius: 16, backgroundColor: '#7c3aed' },
+  editorConfirmText:{ color: '#fff', fontSize: 13, fontWeight: '600' },
+
+  // ── Panel de Sugerencias Armónicas ────────────────────────────────────────
+  suggestionsWrap: { width: '100%', marginBottom: 8 },
+  suggestionsToggle: {
+    alignSelf: 'center',
+    paddingHorizontal: 14, paddingVertical: 5,
+    borderRadius: 10, borderWidth: 1, borderColor: '#1e1e2e',
+  },
+  suggestionsToggleText: { color: '#303050', fontSize: 10, letterSpacing: 1.5, textTransform: 'uppercase' },
+  suggestionsPanel: { marginTop: 10, gap: 10 },
+
+  // Cada fila de motor
+  sugRow:      { gap: 4 },
+  sugRowLabel: { color: '#252540', fontSize: 9, letterSpacing: 2, textTransform: 'uppercase' },
+  sugChips:    { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  sugChip: {
+    paddingHorizontal: 10, paddingVertical: 6,
+    borderRadius: 10, borderWidth: 1,
+    backgroundColor: '#0c0c18',
+    alignItems: 'center',
+    minWidth: 48,
+  },
+  sugChipChord:  { color: '#a090d0', fontSize: 13, fontWeight: '700' },
+  sugChipDegree: { fontSize: 9, letterSpacing: 0.5, marginTop: 1 },
+  sugDivider:    { height: 1, backgroundColor: '#14142a', marginVertical: 2 },
 });

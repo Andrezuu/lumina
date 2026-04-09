@@ -3,6 +3,8 @@ import { useAudioStream } from './useAudioStream';
 import { buildChromagram, computeRMS } from '../lib/chromagram';
 import { detectChord, ChordResult } from '../lib/chordDetection';
 import { detectTonality, TonalityResult } from '../lib/tonality';
+
+export type { TonalityResult };
 import { detectMode, ModeResult } from '../lib/mode';
 
 // ---------------------------------------------------------------------------
@@ -42,6 +44,12 @@ const CHORD_HISTORY_SIZE = 4;
 // Do not compute tonality or mode until this many confirmed chords exist.
 const MIN_CHORDS_FOR_ANALYSIS = 2;
 
+/**
+ * Number of *unique* chords the calibration phase must collect before
+ * triggering the confirmation modal.
+ */
+export const CALIBRATION_SIZE = 4;
+
 // ---------------------------------------------------------------------------
 // Private types
 // ---------------------------------------------------------------------------
@@ -75,6 +83,12 @@ export interface ChordDetectionState {
   hasSignal: boolean;
   isRecording: boolean;
   error: string | null;
+  /**
+   * Calibration buffer: unique chord names collected during CALIBRATING phase.
+   * Grows from 0 → CALIBRATION_SIZE. The UI watches this to show the counter
+   * and trigger the confirmation modal when it reaches CALIBRATION_SIZE.
+   */
+  calibrationBuffer: string[];
 }
 
 /**
@@ -86,13 +100,26 @@ export interface ChordDetectionState {
  *  3. Majority vote  — the displayed chord must win VOTE_WINDOW frames by
  *                      at least MIN_VOTES_TO_CONFIRM votes.
  */
-export function useChordDetection(): ChordDetectionState & {
+export function useChordDetection(opts?: {
+  /** When defined, tonality evaluation is bypassed and this value is used instead. */
+  lockedTonality?: TonalityResult | null;
+}): ChordDetectionState & {
   start: () => Promise<void>;
   stop: () => Promise<void>;
   resetHistory: () => void;
   editChord: (index: number, newChord: string) => void;
+  /**
+   * Re-computes the tonality for an arbitrary list of chord names using the
+   * representative chroma vectors captured during the session.
+   * Returns null if none of the names have a stored chroma (e.g. before any
+   * audio has been processed).
+   */
+  recomputeTonalityForChords: (names: string[]) => TonalityResult | null;
 } {
   const { samples, isRecording, error, start, stop } = useAudioStream();
+
+  // If the caller provides a locked tonality, we skip live tonality detection.
+  const lockedTonality = opts?.lockedTonality ?? null;
 
   // Sliding window of recent chord names (null = silent / low-confidence frame)
   const voteWindowRef      = useRef<(string | null)[]>([]);
@@ -110,6 +137,7 @@ export function useChordDetection(): ChordDetectionState & {
     hasSignal:   false,
     isRecording: false,
     error:       null,
+    calibrationBuffer: [],
   });
 
   useEffect(() => {
@@ -193,7 +221,8 @@ export function useChordDetection(): ChordDetectionState & {
 
     const history = confirmedChordsRef.current;
     if (history.length >= MIN_CHORDS_FOR_ANALYSIS) {
-      tonality = detectTonality(history.map(e => e.representativeChroma));
+      // If the caller has locked a tonality, bypass live detection entirely.
+      tonality = lockedTonality ?? detectTonality(history.map(e => e.representativeChroma));
       const avgChroma = new Float32Array(12);
       for (const e of history) {
         for (let i = 0; i < 12; i++) avgChroma[i] += e.representativeChroma[i];
@@ -211,6 +240,11 @@ export function useChordDetection(): ChordDetectionState & {
       chordHistory: confirmedChordsRef.current.map(e => ({ chord: e.chord.chord, edited: false })),
       rmsDb,
       hasSignal,
+      // Calibration buffer: unique chord names from the confirmed history,
+      // capped at CALIBRATION_SIZE. The UI reads this to drive the counter.
+      calibrationBuffer: [
+        ...new Set(confirmedChordsRef.current.map(e => e.chord.chord)),
+      ].slice(0, CALIBRATION_SIZE),
     }));
   }, [samples]);
 
@@ -223,6 +257,7 @@ export function useChordDetection(): ChordDetectionState & {
         ...prev,
         chord: null, chroma: null, tonality: null, mode: null,
         chordHistory: [], rmsDb: -Infinity, hasSignal: false,
+        calibrationBuffer: [],
       }));
     }
   }, [isRecording]);
@@ -235,6 +270,7 @@ export function useChordDetection(): ChordDetectionState & {
       ...prev,
       chord: null, chroma: null, tonality: null, mode: null,
       chordHistory: [], rmsDb: -Infinity, hasSignal: false,
+      calibrationBuffer: [],
     }));
   };
 
@@ -248,5 +284,19 @@ export function useChordDetection(): ChordDetectionState & {
     });
   };
 
-  return { ...state, start, stop, resetHistory, editChord };
+  /**
+   * Re-computes tonality for the given chord names using the representative
+   * chroma vectors stored during audio processing.
+   * Falls back to the current state tonality when a chord has no stored chroma.
+   */
+  const recomputeTonalityForChords = (names: string[]): TonalityResult | null => {
+    const map = chordChromaMapRef.current;
+    const chromas: Float32Array[] = names
+      .map(n => map.get(n))
+      .filter((c): c is Float32Array => c !== undefined);
+    if (chromas.length === 0) return state.tonality;
+    return detectTonality(chromas);
+  };
+
+  return { ...state, start, stop, resetHistory, editChord, recomputeTonalityForChords };
 }
