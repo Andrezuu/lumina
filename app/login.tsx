@@ -3,7 +3,7 @@
  */
 
 import { router } from 'expo-router';
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -21,16 +21,13 @@ export default function LoginScreen() {
   const login      = useAuthStore(s => s.login);
   const loading    = useAuthStore(s => s.loading);
   const error      = useAuthStore(s => s.error);
-  const token      = useAuthStore(s => s.token);
   const clearError = useAuthStore(s => s.clearError);
 
   const [email,    setEmail]    = useState('');
   const [password, setPassword] = useState('');
 
-  // If already authenticated, go straight to the main screen
-  useEffect(() => {
-    if (token) router.replace('/');
-  }, [token]);
+  // Token set → AuthGuard in _layout.tsx will redirect to /(tabs) automatically
+  // No manual router.replace needed here
 
   const handleLogin = async () => {
     if (!email.trim() || !password.trim()) return;

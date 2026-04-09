@@ -3,7 +3,7 @@
  */
 
 import { router } from 'expo-router';
-import React, { useEffect, useState } from 'react';
+import React, { useState } from 'react';
 import {
   ActivityIndicator,
   KeyboardAvoidingView,
@@ -22,7 +22,6 @@ export default function RegisterScreen() {
   const register   = useAuthStore(s => s.register);
   const loading    = useAuthStore(s => s.loading);
   const error      = useAuthStore(s => s.error);
-  const token      = useAuthStore(s => s.token);
   const clearError = useAuthStore(s => s.clearError);
 
   const [name,     setName]     = useState('');
@@ -31,10 +30,8 @@ export default function RegisterScreen() {
   const [confirm,  setConfirm]  = useState('');
   const [localErr, setLocalErr] = useState<string | null>(null);
 
-  // If registration succeeded the token will be set, navigate home
-  useEffect(() => {
-    if (token) router.replace('/');
-  }, [token]);
+  // Token set → AuthGuard in _layout.tsx will redirect to /(tabs) automatically
+  // No manual router.replace needed here
 
   const handleRegister = async () => {
     setLocalErr(null);
